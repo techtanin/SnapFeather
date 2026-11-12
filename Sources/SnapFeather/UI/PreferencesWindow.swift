@@ -67,6 +67,7 @@ final class PreferencesWindowController: NSWindowController, NSWindowDelegate, N
             ? "Screen Recording: Granted"
             : "Screen Recording: Permission Needed"
         permissionStatusLabel.textColor = granted ? .systemGreen : .systemOrange
+        refreshFolderLabel()
         refreshDriveStatus()
     }
 

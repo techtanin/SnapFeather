@@ -232,7 +232,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         let bundleURL = Bundle.main.bundleURL
         let config = NSWorkspace.OpenConfiguration()
         config.createsNewApplicationInstance = true
-        NSWorkspace.shared.openApplication(at: bundleURL, configuration: config) { _, _ in
+        NSWorkspace.shared.openApplication(at: bundleURL, configuration: config) { _, error in
+            if let error {
+                Diagnostics.log("Relaunch failed: \(error.localizedDescription)")
+            }
             Task { @MainActor in
                 NSApp.terminate(nil)
             }

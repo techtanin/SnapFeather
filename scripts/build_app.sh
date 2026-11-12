@@ -165,13 +165,49 @@ if [[ -n "$PROVISIONING_PROFILE" ]]; then
     cp "$PROVISIONING_PROFILE" "$CONTENTS_DIR/embedded.provisionprofile"
 fi
 
+TEMP_ENTITLEMENTS=""
+cleanup() {
+    if [[ -n "$TEMP_ENTITLEMENTS" && -f "$TEMP_ENTITLEMENTS" ]]; then
+        rm -f "$TEMP_ENTITLEMENTS"
+    fi
+}
+trap cleanup EXIT
+
+SIGN_ENTITLEMENTS="$ENTITLEMENTS_PATH"
+if [[ "$USE_SANDBOX" == "1" && -f "$ENTITLEMENTS_PATH" && -n "$PROVISIONING_PROFILE" ]]; then
+    echo "==> Merging provisioning profile application-identifier & team-identifier entitlements..."
+    TEMP_ENTITLEMENTS="$(mktemp)"
+    cp "$ENTITLEMENTS_PATH" "$TEMP_ENTITLEMENTS"
+    python3 - "$PROVISIONING_PROFILE" "$TEMP_ENTITLEMENTS" <<'PY'
+import plistlib
+import subprocess
+import sys
+
+profile_path, entitlements_path = sys.argv[1], sys.argv[2]
+cms_xml = subprocess.check_output(["security", "cms", "-D", "-i", profile_path])
+profile = plistlib.loads(cms_xml)
+profile_entitlements = profile.get("Entitlements", {})
+
+with open(entitlements_path, "rb") as f:
+    app_entitlements = plistlib.load(f)
+
+for key in ("com.apple.application-identifier", "com.apple.developer.team-identifier"):
+    if key in profile_entitlements:
+        app_entitlements[key] = profile_entitlements[key]
+
+with open(entitlements_path, "wb") as f:
+    plistlib.dump(app_entitlements, f)
+PY
+    SIGN_ENTITLEMENTS="$TEMP_ENTITLEMENTS"
+fi
+
 CODESIGN_ARGS=(--force --deep --sign "$SIGN_IDENTITY")
 if [[ "$SIGN_IDENTITY" != "-" ]]; then
     CODESIGN_ARGS+=(--options runtime --timestamp)
 fi
-if [[ "$USE_SANDBOX" == "1" && -f "$ENTITLEMENTS_PATH" ]]; then
+if [[ "$USE_SANDBOX" == "1" && -f "$SIGN_ENTITLEMENTS" ]]; then
     echo "==> Code signing with App Sandbox entitlements (identity: $SIGN_IDENTITY)..."
-    CODESIGN_ARGS+=(--entitlements "$ENTITLEMENTS_PATH")
+    CODESIGN_ARGS+=(--entitlements "$SIGN_ENTITLEMENTS")
 else
     echo "==> Code signing (identity: $SIGN_IDENTITY)..."
 fi
