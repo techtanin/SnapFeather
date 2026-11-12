@@ -22,15 +22,27 @@ Native Apple Silicon (`arm64`) screenshot, annotation, and Google Drive upload u
 - Xcode Command Line Tools (Swift 6+)
 - Homebrew `webp` (`brew install webp`) for static `libwebp` linking
 
-## Build, Test & Run
+## Install (Prebuilt `.dmg`)
+
+1. Download **`SnapFeather-v<version>-arm64.dmg`** from [GitHub Releases](https://github.com/techtanin/SnapFeather/releases).
+2. Open the `.dmg` and drag **`SnapFeather.app`** onto **`Applications`**.
+3. First launch (ad-hoc signed): if macOS Gatekeeper blocks opening, go to **System Settings → Privacy & Security → Open Anyway**, or run:
+   ```bash
+   xattr -cr /Applications/SnapFeather.app && open /Applications/SnapFeather.app
+   ```
+
+## Build, Test & Package From Source
 
 ```bash
 # Run unit tests
 swift test -Xswiftc -load-plugin-library -Xswiftc /Library/Developer/CommandLineTools/usr/lib/swift/host/plugins/testing/libTestingMacros.dylib
 
 # Build native arm64 .app bundle at dist/SnapFeather.app
-chmod +x scripts/build_app.sh
+chmod +x scripts/build_app.sh scripts/create_dmg.sh
 ./scripts/build_app.sh
+
+# Package drag-and-drop macOS DMG installer at dist/SnapFeather-v<version>-arm64.dmg
+./scripts/create_dmg.sh
 
 # Launch the app
 open dist/SnapFeather.app

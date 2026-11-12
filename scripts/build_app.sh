@@ -3,7 +3,10 @@ set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 APP_NAME="SnapFeather"
-BUNDLE_ID="com.taninahmed.snapfeather"
+BUNDLE_ID="${BUNDLE_ID:-com.taninahmed.snapfeather}"
+APP_VERSION="${APP_VERSION:-1.0.1}"
+BUILD_NUMBER="${BUILD_NUMBER:-2}"
+SIGN_IDENTITY="${SIGN_IDENTITY:--}"
 DIST_DIR="$ROOT_DIR/dist"
 APP_BUNDLE="$DIST_DIR/${APP_NAME}.app"
 CONTENTS_DIR="$APP_BUNDLE/Contents"
@@ -125,9 +128,9 @@ cat > "$CONTENTS_DIR/Info.plist" <<PLIST
     <key>CFBundlePackageType</key>
     <string>APPL</string>
     <key>CFBundleShortVersionString</key>
-    <string>1.0.1</string>
+    <string>$APP_VERSION</string>
     <key>CFBundleVersion</key>
-    <string>2</string>
+    <string>$BUILD_NUMBER</string>
     <key>LSApplicationCategoryType</key>
     <string>public.app-category.productivity</string>
     <key>LSMinimumSystemVersion</key>
@@ -144,8 +147,12 @@ PLIST
 
 printf "APPL????" > "$CONTENTS_DIR/PkgInfo"
 
-echo "==> Ad-hoc code signing..."
-codesign --force --deep --sign - "$APP_BUNDLE"
+echo "==> Code signing (identity: $SIGN_IDENTITY)..."
+if [[ "$SIGN_IDENTITY" != "-" ]]; then
+    codesign --force --deep --options runtime --timestamp --sign "$SIGN_IDENTITY" "$APP_BUNDLE"
+else
+    codesign --force --deep --sign - "$APP_BUNDLE"
+fi
 
 echo "==> Done!"
 file "$MACOS_DIR/$APP_NAME"
