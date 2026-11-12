@@ -54,6 +54,7 @@ struct HotKeyShortcut: Codable, Equatable, Sendable {
 
     static let presets: [HotKeyShortcut] = [
         HotKeyShortcut(keyCode: UInt32(kVK_ANSI_2), modifiers: UInt32(cmdKey | shiftKey), displayLabel: "⌘⇧2"),
+        HotKeyShortcut(keyCode: UInt32(kVK_ANSI_S), modifiers: UInt32(cmdKey | shiftKey), displayLabel: "⌘⇧S"),
         HotKeyShortcut(keyCode: UInt32(kVK_ANSI_S), modifiers: UInt32(optionKey | shiftKey), displayLabel: "⌥⇧S"),
         HotKeyShortcut(keyCode: UInt32(kVK_ANSI_S), modifiers: UInt32(controlKey | shiftKey), displayLabel: "⌃⇧S"),
         HotKeyShortcut(keyCode: UInt32(kVK_ANSI_1), modifiers: UInt32(optionKey | cmdKey), displayLabel: "⌥⌘1"),

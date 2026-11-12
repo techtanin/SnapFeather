@@ -106,6 +106,7 @@ struct SnapFeatherTests {
         #expect(reloaded.textFontSize == 72.0)
 
         #expect(reloaded.hotKeyShortcut == HotKeyShortcut.presets[1])
+        #expect(HotKeyShortcut.presets.contains(where: { $0.displayLabel == "⌘⇧S" }))
         #expect(reloaded.googleDriveClientID == "test-client.apps.googleusercontent.com")
         #expect(reloaded.googleDriveFolderName == "My Screenshots")
         #expect(reloaded.autoSaveToDriveOnCopy == true)

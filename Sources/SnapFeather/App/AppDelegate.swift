@@ -5,6 +5,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var statusItem: NSStatusItem?
     private var takeScreenshotMenuItem: NSMenuItem?
     private var activeCoordinator: CaptureSessionCoordinator?
+    private var isStartingCapture = false
     private var preferencesController: PreferencesWindowController?
 
     func applicationDidFinishLaunching(_ notification: Notification) {
@@ -96,13 +97,21 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     @objc func startRegionCapture() {
-        Diagnostics.log("startRegionCapture triggered activeCoordinator=\(activeCoordinator != nil)")
-        guard activeCoordinator == nil else { return }
+        Diagnostics.log("startRegionCapture triggered activeCoordinator=\(activeCoordinator != nil) isStarting=\(isStartingCapture)")
+        if let active = activeCoordinator {
+            // Re-pressing hotkey cancels the active overlay cleanly
+            active.captureSessionDidCancel()
+            return
+        }
+        guard !isStartingCapture else { return }
+        isStartingCapture = true
 
         Task { @MainActor [weak self] in
             guard let self else { return }
+            defer { self.isStartingCapture = false }
             do {
                 let snapshots = try await ScreenCaptureService.shared.captureAllScreens()
+                guard self.activeCoordinator == nil else { return }
                 Diagnostics.log("Captured \(snapshots.count) snapshots; starting overlay")
                 let coordinator = CaptureSessionCoordinator(snapshots: snapshots) { [weak self] in
                     self?.activeCoordinator = nil
@@ -122,7 +131,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     @objc private func captureFullScreenToClipboard() {
-        Task { @MainActor in
+        guard !isStartingCapture, activeCoordinator == nil else { return }
+        isStartingCapture = true
+
+        Task { @MainActor [weak self] in
+            guard let self else { return }
+            defer { self.isStartingCapture = false }
             do {
                 let snapshots = try await ScreenCaptureService.shared.captureAllScreens()
                 let target = snapshots.first { $0.screen.frame.contains(NSEvent.mouseLocation) } ?? snapshots.first

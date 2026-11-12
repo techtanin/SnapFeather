@@ -18,6 +18,7 @@ enum CaptureCompletionAction: Sendable {
 final class CaptureSessionCoordinator: CaptureSessionDelegate {
     private var windows: [CaptureOverlayWindow] = []
     private var activeWindow: CaptureOverlayWindow?
+    private var escapeMonitor: Any?
     private let onFinish: @MainActor () -> Void
 
     init(snapshots: [ScreenSnapshot], onFinish: @escaping @MainActor () -> Void) {
@@ -29,6 +30,11 @@ final class CaptureSessionCoordinator: CaptureSessionDelegate {
     }
 
     func start() {
+        guard !windows.isEmpty else {
+            onFinish()
+            return
+        }
+        installEscapeMonitor()
         NSApp.activate(ignoringOtherApps: true)
         for win in windows {
             win.makeKeyAndOrderFront(nil)
@@ -36,6 +42,26 @@ final class CaptureSessionCoordinator: CaptureSessionDelegate {
         if let mouseWindow = windows.first(where: { $0.frame.contains(NSEvent.mouseLocation) }) ?? windows.first {
             mouseWindow.makeKey()
             activeWindow = mouseWindow
+        }
+    }
+
+    private func installEscapeMonitor() {
+        removeEscapeMonitor()
+        escapeMonitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { [weak self] event in
+            guard let self, event.keyCode == 53 else { return event }
+            if let activeCanvas = self.activeWindow?.contentView as? CaptureCanvasView,
+               activeCanvas.hasActiveTextInput {
+                return event
+            }
+            self.captureSessionDidCancel()
+            return nil
+        }
+    }
+
+    private func removeEscapeMonitor() {
+        if let monitor = escapeMonitor {
+            NSEvent.removeMonitor(monitor)
+            escapeMonitor = nil
         }
     }
 
@@ -85,6 +111,7 @@ final class CaptureSessionCoordinator: CaptureSessionDelegate {
                     uploadToGoogleDrive(image: image, format: prefs.imageFormat, filename: filename, copyShareLink: false)
                 }
             } catch {
+                closeAll()
                 presentSaveError(error)
             }
 
@@ -154,11 +181,13 @@ final class CaptureSessionCoordinator: CaptureSessionDelegate {
     }
 
     private func closeAll() {
+        removeEscapeMonitor()
         for win in windows {
             win.orderOut(nil)
             win.close()
         }
         windows.removeAll()
+        activeWindow = nil
         onFinish()
     }
 
@@ -224,7 +253,7 @@ final class CaptureOverlayWindow: NSWindow {
         )
         self.setFrame(frame, display: false)
 
-        self.level = .screenSaver
+        self.level = .statusBar
         self.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary, .stationary]
         self.isOpaque = true
         self.hasShadow = false
@@ -293,6 +322,7 @@ final class CaptureCanvasView: NSView, FloatingToolbarsDelegate, NSTextFieldDele
 
     override var isFlipped: Bool { true }
     override var acceptsFirstResponder: Bool { true }
+    var hasActiveTextInput: Bool { activeTextField != nil }
 
     init(frame frameRect: NSRect, snapshot: ScreenSnapshot, coordinator: CaptureSessionCoordinator) {
         self.snapshot = snapshot
@@ -768,7 +798,7 @@ final class CaptureCanvasView: NSView, FloatingToolbarsDelegate, NSTextFieldDele
                 window?.makeFirstResponder(self)
                 return
             }
-            coordinator?.captureSessionDidCancel()
+            toolbarsDidClickClose()
             return
         }
 
@@ -1175,7 +1205,12 @@ final class CaptureCanvasView: NSView, FloatingToolbarsDelegate, NSTextFieldDele
     }
 
     func toolbarsDidClickClose() {
-        coordinator?.captureSessionDidCancel()
+        if let coordinator {
+            coordinator.captureSessionDidCancel()
+        } else {
+            window?.orderOut(nil)
+            window?.close()
+        }
     }
 
     private func exportSelectedImage() -> NSImage? {
@@ -1191,7 +1226,12 @@ final class CaptureCanvasView: NSView, FloatingToolbarsDelegate, NSTextFieldDele
     private func finishCapture(action: CaptureCompletionAction) {
         commitActiveTextField()
         guard let image = exportSelectedImage() else { return }
-        coordinator?.captureSessionDidComplete(with: image, action: action)
+        if let coordinator {
+            coordinator.captureSessionDidComplete(with: image, action: action)
+        } else {
+            window?.orderOut(nil)
+            window?.close()
+        }
     }
 }
 
