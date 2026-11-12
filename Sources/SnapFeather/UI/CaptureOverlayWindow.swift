@@ -35,22 +35,27 @@ final class CaptureSessionCoordinator: CaptureSessionDelegate {
             return
         }
         installEscapeMonitor()
-        NSApp.activate(ignoringOtherApps: true)
+
+        let mouseLocation = NSEvent.mouseLocation
+        let targetWindow = windows.first(where: { $0.frame.contains(mouseLocation) }) ?? windows.first
+        activeWindow = targetWindow
+
         for win in windows {
-            win.makeKeyAndOrderFront(nil)
+            win.prepareForDisplay(mouseScreenPoint: mouseLocation)
         }
-        if let mouseWindow = windows.first(where: { $0.frame.contains(NSEvent.mouseLocation) }) ?? windows.first {
-            mouseWindow.makeKey()
-            activeWindow = mouseWindow
+
+        NSApp.activate(ignoringOtherApps: true)
+        for win in windows where win !== targetWindow {
+            win.orderFrontRegardless()
         }
+        targetWindow?.makeKeyAndOrderFront(nil)
     }
 
     private func installEscapeMonitor() {
         removeEscapeMonitor()
         escapeMonitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { [weak self] event in
             guard let self, event.keyCode == 53 else { return event }
-            if let activeCanvas = self.activeWindow?.contentView as? CaptureCanvasView,
-               activeCanvas.hasActiveTextInput {
+            if self.activeWindow?.hasActiveTextInput == true {
                 return event
             }
             self.captureSessionDidCancel()
@@ -234,16 +239,58 @@ extension Notification.Name {
 }
 
 @MainActor
+private final class SnapshotBackdropView: NSView {
+    init(frame frameRect: NSRect, cgImage: CGImage, scale: CGFloat) {
+        super.init(frame: frameRect)
+        wantsLayer = true
+        autoresizingMask = [.width, .height]
+        layer?.contents = cgImage
+        layer?.contentsGravity = .resize
+        layer?.contentsScale = scale
+        layer?.actions = [
+            "contents": NSNull(),
+            "bounds": NSNull(),
+            "position": NSNull()
+        ]
+    }
+
+    @available(*, unavailable)
+    required init?(coder: NSCoder) {
+        fatalError("init(coder:) has not been implemented")
+    }
+
+    override var isOpaque: Bool { true }
+}
+
+@MainActor
 final class CaptureOverlayWindow: NSWindow {
+    private let targetFrame: NSRect
+    private let backdropView: SnapshotBackdropView
     private let canvasView: CaptureCanvasView
+
+    var hasActiveTextInput: Bool { canvasView.hasActiveTextInput }
 
     init(snapshot: ScreenSnapshot, coordinator: CaptureSessionCoordinator) {
         let frame = snapshot.screen.frame
+        self.targetFrame = frame
+        let contentBounds = NSRect(origin: .zero, size: frame.size)
+        let rootView = NSView(frame: contentBounds)
+        rootView.wantsLayer = true
+
+        self.backdropView = SnapshotBackdropView(
+            frame: contentBounds,
+            cgImage: snapshot.cgImage,
+            scale: snapshot.backingScaleFactor
+        )
         self.canvasView = CaptureCanvasView(
-            frame: NSRect(origin: .zero, size: frame.size),
+            frame: contentBounds,
             snapshot: snapshot,
             coordinator: coordinator
         )
+        self.canvasView.autoresizingMask = [.width, .height]
+
+        rootView.addSubview(backdropView)
+        rootView.addSubview(canvasView)
 
         super.init(
             contentRect: frame,
@@ -251,21 +298,39 @@ final class CaptureOverlayWindow: NSWindow {
             backing: .buffered,
             defer: false
         )
-        self.setFrame(frame, display: false)
 
-        self.level = .statusBar
+        self.animationBehavior = .none
+        self.level = NSWindow.Level(rawValue: NSWindow.Level.statusBar.rawValue + 1)
         self.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary, .stationary]
         self.isOpaque = true
         self.hasShadow = false
         self.acceptsMouseMovedEvents = true
         self.isReleasedWhenClosed = false
-        self.contentView = canvasView
+        self.setFrame(frame, display: false)
+        self.contentView = rootView
         self.makeFirstResponder(canvasView)
         canvasView.ownerWindow = self
     }
 
     override var canBecomeKey: Bool { true }
     override var canBecomeMain: Bool { true }
+
+    override func constrainFrameRect(_ frameRect: NSRect, to screen: NSScreen?) -> NSRect {
+        // Prevent AppKit from shifting the borderless overlay below the macOS menu bar
+        frameRect
+    }
+
+    func prepareForDisplay(mouseScreenPoint: CGPoint) {
+        setFrame(targetFrame, display: false)
+        if targetFrame.contains(mouseScreenPoint) {
+            let localPt = NSPoint(
+                x: mouseScreenPoint.x - targetFrame.minX,
+                y: targetFrame.maxY - mouseScreenPoint.y
+            )
+            canvasView.setInitialHoverPoint(localPt)
+        }
+        displayIfNeeded()
+    }
 
     func clearSelectionFromPeer() {
         canvasView.clearSelection()
@@ -288,7 +353,6 @@ final class CaptureCanvasView: NSView, FloatingToolbarsDelegate {
     private weak var coordinator: CaptureSessionCoordinator?
 
     private let snapshot: ScreenSnapshot
-    private let backgroundImage: NSImage
 
     private var selectionRect: CGRect? {
         didSet { updateToolbarsLayout() }
@@ -316,18 +380,23 @@ final class CaptureCanvasView: NSView, FloatingToolbarsDelegate {
     private let horizontalToolbar = HorizontalActionToolbar()
     private var activeTextEditor: InlineTextEditorView?
     private var editingAnnotationIndex: Int?
+    private var trackingAreaRef: NSTrackingArea?
 
     private let handleSize: CGFloat = 8.0
 
     override var isFlipped: Bool { true }
+    override var isOpaque: Bool { false }
     override var acceptsFirstResponder: Bool { true }
     var hasActiveTextInput: Bool { activeTextEditor != nil }
 
     init(frame frameRect: NSRect, snapshot: ScreenSnapshot, coordinator: CaptureSessionCoordinator) {
         self.snapshot = snapshot
         self.coordinator = coordinator
-        self.backgroundImage = NSImage(cgImage: snapshot.cgImage, size: frameRect.size)
         super.init(frame: frameRect)
+        wantsLayer = true
+        layerContentsRedrawPolicy = .onSetNeedsDisplay
+        layer?.isOpaque = false
+        layer?.backgroundColor = NSColor.clear.cgColor
 
         verticalToolbar.delegate = self
         horizontalToolbar.delegate = self
@@ -346,13 +415,25 @@ final class CaptureCanvasView: NSView, FloatingToolbarsDelegate {
     override func viewDidMoveToWindow() {
         super.viewDidMoveToWindow()
         window?.acceptsMouseMovedEvents = true
-        let tracking = NSTrackingArea(
+    }
+
+    override func updateTrackingAreas() {
+        super.updateTrackingAreas()
+        if let trackingAreaRef {
+            removeTrackingArea(trackingAreaRef)
+        }
+        let area = NSTrackingArea(
             rect: bounds,
             options: [.mouseMoved, .mouseEnteredAndExited, .activeAlways, .inVisibleRect],
             owner: self,
             userInfo: nil
         )
-        addTrackingArea(tracking)
+        addTrackingArea(area)
+        trackingAreaRef = area
+    }
+
+    func setInitialHoverPoint(_ point: CGPoint) {
+        hoverPoint = point.clamped(to: bounds)
     }
 
     func clearSelection() {
@@ -372,15 +453,6 @@ final class CaptureCanvasView: NSView, FloatingToolbarsDelegate {
 
     override func draw(_ dirtyRect: NSRect) {
         super.draw(dirtyRect)
-
-        backgroundImage.draw(
-            in: bounds,
-            from: .zero,
-            operation: .copy,
-            fraction: 1.0,
-            respectFlipped: true,
-            hints: nil
-        )
 
         guard let ctx = NSGraphicsContext.current?.cgContext else { return }
 

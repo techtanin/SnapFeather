@@ -78,8 +78,8 @@ final class ScreenCaptureService {
 
             let scale = max(screen.backingScaleFactor, 1.0)
             let config = SCStreamConfiguration()
-            config.width = Int(screen.frame.width * scale)
-            config.height = Int(screen.frame.height * scale)
+            config.width = Int(round(screen.frame.width * scale))
+            config.height = Int(round(screen.frame.height * scale))
             config.showsCursor = false
             config.scalesToFit = false
             config.captureResolution = .best
