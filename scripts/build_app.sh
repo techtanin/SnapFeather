@@ -3,7 +3,13 @@ set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 APP_NAME="SnapFeather"
-BUNDLE_ID="com.taninahmed.snapfeather"
+BUNDLE_ID="${BUNDLE_ID:-com.taninahmed.snapfeather}"
+APP_VERSION="${APP_VERSION:-1.0.0}"
+BUILD_NUMBER="${BUILD_NUMBER:-1}"
+SIGN_IDENTITY="${SIGN_IDENTITY:--}"
+USE_SANDBOX="${USE_SANDBOX:-1}"
+ENTITLEMENTS_PATH="${ENTITLEMENTS_PATH:-$ROOT_DIR/SnapFeather.entitlements}"
+PROVISIONING_PROFILE="${PROVISIONING_PROFILE:-}"
 DIST_DIR="$ROOT_DIR/dist"
 APP_BUNDLE="$DIST_DIR/${APP_NAME}.app"
 CONTENTS_DIR="$APP_BUNDLE/Contents"
@@ -112,6 +118,8 @@ cat > "$CONTENTS_DIR/Info.plist" <<PLIST
 <dict>
     <key>CFBundleDevelopmentRegion</key>
     <string>en</string>
+    <key>CFBundleDisplayName</key>
+    <string>$APP_NAME</string>
     <key>CFBundleExecutable</key>
     <string>$APP_NAME</string>
     <key>CFBundleIconFile</key>
@@ -125,9 +133,11 @@ cat > "$CONTENTS_DIR/Info.plist" <<PLIST
     <key>CFBundlePackageType</key>
     <string>APPL</string>
     <key>CFBundleShortVersionString</key>
-    <string>1.0.0</string>
+    <string>$APP_VERSION</string>
     <key>CFBundleVersion</key>
-    <string>1</string>
+    <string>$BUILD_NUMBER</string>
+    <key>ITSAppUsesNonExemptEncryption</key>
+    <false/>
     <key>LSApplicationCategoryType</key>
     <string>public.app-category.productivity</string>
     <key>LSMinimumSystemVersion</key>
@@ -136,6 +146,8 @@ cat > "$CONTENTS_DIR/Info.plist" <<PLIST
     <true/>
     <key>NSHighResolutionCapable</key>
     <true/>
+    <key>NSHumanReadableCopyright</key>
+    <string>Copyright © 2026 Tanin Ahmed. All rights reserved.</string>
     <key>NSScreenCaptureUsageDescription</key>
     <string>SnapFeather captures your screen so you can select, annotate, copy, or save screenshots.</string>
 </dict>
@@ -144,8 +156,28 @@ PLIST
 
 printf "APPL????" > "$CONTENTS_DIR/PkgInfo"
 
-echo "==> Ad-hoc code signing..."
-codesign --force --deep --sign - "$APP_BUNDLE"
+if [[ -n "$PROVISIONING_PROFILE" ]]; then
+    if [[ ! -f "$PROVISIONING_PROFILE" ]]; then
+        echo "Error: provisioning profile not found at $PROVISIONING_PROFILE"
+        exit 1
+    fi
+    echo "==> Embedding provisioning profile..."
+    cp "$PROVISIONING_PROFILE" "$CONTENTS_DIR/embedded.provisionprofile"
+fi
+
+CODESIGN_ARGS=(--force --deep --sign "$SIGN_IDENTITY")
+if [[ "$SIGN_IDENTITY" != "-" ]]; then
+    CODESIGN_ARGS+=(--options runtime --timestamp)
+fi
+if [[ "$USE_SANDBOX" == "1" && -f "$ENTITLEMENTS_PATH" ]]; then
+    echo "==> Code signing with App Sandbox entitlements (identity: $SIGN_IDENTITY)..."
+    CODESIGN_ARGS+=(--entitlements "$ENTITLEMENTS_PATH")
+else
+    echo "==> Code signing (identity: $SIGN_IDENTITY)..."
+fi
+
+codesign "${CODESIGN_ARGS[@]}" "$APP_BUNDLE"
+codesign --verify --deep --strict "$APP_BUNDLE"
 
 echo "==> Done!"
 file "$MACOS_DIR/$APP_NAME"

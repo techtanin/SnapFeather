@@ -68,6 +68,7 @@ final class AppPreferences {
 
     private enum Keys {
         static let saveDirectory = "SnapFeather.saveDirectory"
+        static let saveDirectoryBookmark = "SnapFeather.saveDirectoryBookmark"
         static let imageFormat = "SnapFeather.imageFormat"
         static let showCrosshairs = "SnapFeather.showCrosshairs"
         static let copyToClipboardOnSave = "SnapFeather.copyToClipboardOnSave"
@@ -86,13 +87,34 @@ final class AppPreferences {
     }
 
     private let defaults: UserDefaults
+    private let sandboxOverride: Bool?
 
-    init(defaults: UserDefaults = .standard) {
+    init(defaults: UserDefaults = .standard, sandboxed: Bool? = nil) {
         self.defaults = defaults
+        self.sandboxOverride = sandboxed
+    }
+
+    var isSandboxed: Bool {
+        if let sandboxOverride {
+            return sandboxOverride
+        }
+        return ProcessInfo.processInfo.environment["APP_SANDBOX_CONTAINER_ID"] != nil
+    }
+
+    var hasSaveDirectoryBookmark: Bool {
+        resolveSaveDirectoryBookmark() != nil
+    }
+
+    /// True when running inside App Sandbox without a user-selected security-scoped folder bookmark.
+    var needsSaveFolderAuthorization: Bool {
+        isSandboxed && !hasSaveDirectoryBookmark
     }
 
     var saveDirectory: URL {
         get {
+            if let bookmarkedURL = resolveSaveDirectoryBookmark()?.url {
+                return bookmarkedURL
+            }
             if let path = defaults.string(forKey: Keys.saveDirectory) {
                 return URL(fileURLWithPath: path, isDirectory: true)
             }
@@ -100,7 +122,72 @@ final class AppPreferences {
                 ?? URL(fileURLWithPath: NSHomeDirectory()).appendingPathComponent("Desktop", isDirectory: true)
         }
         set {
-            defaults.set(newValue.path, forKey: Keys.saveDirectory)
+            setSaveDirectory(newValue)
+        }
+    }
+
+    /// Stores the chosen save folder path and, when supported, a security-scoped bookmark for App Sandbox persistence.
+    func setSaveDirectory(_ url: URL) {
+        defaults.set(url.path, forKey: Keys.saveDirectory)
+
+        let accessing = url.startAccessingSecurityScopedResource()
+        defer {
+            if accessing {
+                url.stopAccessingSecurityScopedResource()
+            }
+        }
+
+        if let bookmarkData = try? url.bookmarkData(
+            options: .withSecurityScope,
+            includingResourceValuesForKeys: nil,
+            relativeTo: nil
+        ) {
+            defaults.set(bookmarkData, forKey: Keys.saveDirectoryBookmark)
+        } else {
+            defaults.removeObject(forKey: Keys.saveDirectoryBookmark)
+        }
+    }
+
+    /// Executes `work` with security-scoped resource access active for the configured save directory.
+    func withSaveDirectoryAccess<T>(_ work: (URL) throws -> T) throws -> T {
+        if let resolved = resolveSaveDirectoryBookmark() {
+            let accessing = resolved.url.startAccessingSecurityScopedResource()
+            defer {
+                if accessing {
+                    resolved.url.stopAccessingSecurityScopedResource()
+                }
+            }
+            if resolved.isStale {
+                refreshBookmark(for: resolved.url)
+            }
+            return try work(resolved.url)
+        }
+        return try work(saveDirectory)
+    }
+
+    private func resolveSaveDirectoryBookmark() -> (url: URL, isStale: Bool)? {
+        guard let data = defaults.data(forKey: Keys.saveDirectoryBookmark) else {
+            return nil
+        }
+        var isStale = false
+        guard let url = try? URL(
+            resolvingBookmarkData: data,
+            options: [.withSecurityScope],
+            relativeTo: nil,
+            bookmarkDataIsStale: &isStale
+        ) else {
+            return nil
+        }
+        return (url, isStale)
+    }
+
+    private func refreshBookmark(for url: URL) {
+        if let freshData = try? url.bookmarkData(
+            options: .withSecurityScope,
+            includingResourceValuesForKeys: nil,
+            relativeTo: nil
+        ) {
+            defaults.set(freshData, forKey: Keys.saveDirectoryBookmark)
         }
     }
 

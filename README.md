@@ -37,3 +37,19 @@ open dist/SnapFeather.app
 ```
 
 > **Note**: On first capture, grant **Screen Recording** permission in **System Settings → Privacy & Security → Screen & System Audio Recording**.
+
+## Mac App Store Packaging
+
+`SnapFeather.entitlements` enables **App Sandbox**, outbound/loopback networking for Google Drive OAuth, and user-selected file read/write with security-scoped bookmarks for Quick Save.
+
+```bash
+chmod +x scripts/package_mas.sh
+APP_SIGN_IDENTITY="Apple Distribution: Your Name (TEAM_ID)" \
+INSTALLER_SIGN_IDENTITY="3rd Party Mac Developer Installer: Your Name (TEAM_ID)" \
+PROVISIONING_PROFILE="/path/to/SnapFeather_MAS.provisionprofile" \
+APP_VERSION="1.0.0" \
+BUILD_NUMBER="1" \
+./scripts/package_mas.sh
+```
+
+Upload the generated `dist/SnapFeather-<version>+<build>-MAS.pkg` using **Transporter** or Xcode Organizer.

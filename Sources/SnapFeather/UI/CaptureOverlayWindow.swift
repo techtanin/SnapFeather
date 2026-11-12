@@ -96,12 +96,31 @@ final class CaptureSessionCoordinator: CaptureSessionDelegate {
 
         case .quickSave:
             let prefs = AppPreferences.shared
-            let folder = prefs.saveDirectory
+            if prefs.needsSaveFolderAuthorization {
+                windows.forEach { $0.orderOut(nil) }
+                NSApp.activate(ignoringOtherApps: true)
+                let folderPanel = NSOpenPanel()
+                folderPanel.message = "Choose a default folder where SnapFeather can save screenshots."
+                folderPanel.prompt = "Choose Folder"
+                folderPanel.canChooseDirectories = true
+                folderPanel.canChooseFiles = false
+                folderPanel.canCreateDirectories = true
+                folderPanel.directoryURL = prefs.saveDirectory
+                guard folderPanel.runModal() == .OK, let chosenFolder = folderPanel.url else {
+                    windows.forEach { $0.makeKeyAndOrderFront(nil) }
+                    activeWindow?.makeKey()
+                    return
+                }
+                prefs.setSaveDirectory(chosenFolder)
+            }
+
             let filename = ImageExporter.defaultFilename(format: prefs.imageFormat)
-            let targetURL = folder.appendingPathComponent(filename)
             do {
-                try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
-                try ImageExporter.write(image, to: targetURL, format: prefs.imageFormat)
+                try prefs.withSaveDirectoryAccess { folder in
+                    let targetURL = folder.appendingPathComponent(filename)
+                    try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
+                    try ImageExporter.write(image, to: targetURL, format: prefs.imageFormat)
+                }
                 if prefs.copyToClipboardOnSave {
                     ImageExporter.copyToClipboard(image)
                 }
@@ -119,6 +138,7 @@ final class CaptureSessionCoordinator: CaptureSessionDelegate {
             let prefs = AppPreferences.shared
             // Temporarily hide overlay windows so the native save panel is frontmost
             windows.forEach { $0.orderOut(nil) }
+            NSApp.activate(ignoringOtherApps: true)
 
             let panel = NSSavePanel()
             panel.canCreateDirectories = true

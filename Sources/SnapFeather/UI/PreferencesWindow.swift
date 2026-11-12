@@ -280,7 +280,7 @@ final class PreferencesWindowController: NSWindowController, NSWindowDelegate, N
         if let fmtIdx = ImageFormat.allCases.firstIndex(of: prefs.imageFormat) {
             formatPopup.selectItem(at: fmtIdx)
         }
-        folderLabel.stringValue = prefs.saveDirectory.path
+        refreshFolderLabel()
         crosshairsCheckbox.state = prefs.showCrosshairs ? .on : .off
         copyOnSaveCheckbox.state = prefs.copyToClipboardOnSave ? .on : .off
 
@@ -338,10 +338,22 @@ final class PreferencesWindowController: NSWindowController, NSWindowDelegate, N
         panel.canChooseDirectories = true
         panel.canChooseFiles = false
         panel.canCreateDirectories = true
+        panel.prompt = "Choose Folder"
         panel.directoryURL = AppPreferences.shared.saveDirectory
         if panel.runModal() == .OK, let url = panel.url {
-            AppPreferences.shared.saveDirectory = url
-            folderLabel.stringValue = url.path
+            AppPreferences.shared.setSaveDirectory(url)
+            refreshFolderLabel()
+        }
+    }
+
+    private func refreshFolderLabel() {
+        let prefs = AppPreferences.shared
+        if prefs.needsSaveFolderAuthorization {
+            folderLabel.stringValue = "Not authorized (Click Choose… for Quick Save)"
+            folderLabel.toolTip = prefs.saveDirectory.path
+        } else {
+            folderLabel.stringValue = prefs.saveDirectory.path
+            folderLabel.toolTip = prefs.saveDirectory.path
         }
     }
 

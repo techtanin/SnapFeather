@@ -195,4 +195,31 @@ struct SnapFeatherTests {
         let movedStroke = stroke.translated(by: CGVector(dx: 100, dy: 0))
         #expect(movedStroke.hitTest(point: CGPoint(x: 125, y: 25)))
     }
+
+    @Test
+    func sandboxSaveDirectoryBookmarkRoundTrip() throws {
+        let suiteName = "SnapFeatherTests.Sandbox.\(UUID().uuidString)"
+        let defaults = UserDefaults(suiteName: suiteName)!
+        defer { defaults.removePersistentDomain(forName: suiteName) }
+
+        let tempDir = FileManager.default.temporaryDirectory
+            .appendingPathComponent("SnapFeatherBookmarkTest-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: tempDir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: tempDir) }
+
+        let nonSandboxPrefs = AppPreferences(defaults: defaults, sandboxed: false)
+        #expect(nonSandboxPrefs.needsSaveFolderAuthorization == false)
+
+        let sandboxPrefs = AppPreferences(defaults: defaults, sandboxed: true)
+        #expect(sandboxPrefs.needsSaveFolderAuthorization == true)
+
+        sandboxPrefs.setSaveDirectory(tempDir)
+        #expect(sandboxPrefs.hasSaveDirectoryBookmark == true)
+        #expect(sandboxPrefs.needsSaveFolderAuthorization == false)
+
+        let accessedPath = try sandboxPrefs.withSaveDirectoryAccess { url in
+            url.standardizedFileURL.path
+        }
+        #expect(accessedPath == tempDir.standardizedFileURL.path)
+    }
 }
