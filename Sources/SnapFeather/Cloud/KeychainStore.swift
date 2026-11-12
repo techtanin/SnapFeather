@@ -1,47 +1,132 @@
 import Foundation
 import Security
 
-struct GoogleDriveSession: Codable, Sendable {
+struct GoogleDriveSession: Codable, Equatable, Sendable {
     var accessToken: String
     var refreshToken: String?
     var expiresAt: Date
     var userEmail: String?
 }
 
+private struct GoogleDriveVault: Codable, Equatable, Sendable {
+    var session: GoogleDriveSession?
+    var clientSecret: String?
+}
+
 enum KeychainStore {
     private static let service = "com.taninahmed.snapfeather.googledrive"
-    private static let sessionAccount = "oauth_session"
-    private static let clientSecretAccount = "oauth_client_secret"
+    private static let vaultAccount = "oauth_vault"
+    private static let legacySessionAccount = "oauth_session"
+    private static let legacyClientSecretAccount = "oauth_client_secret"
+
+    private static let lock = NSLock()
+    private static nonisolated(unsafe) var hasLoadedVault = false
+    private static nonisolated(unsafe) var cachedVault = GoogleDriveVault()
 
     static func saveSession(_ session: GoogleDriveSession) throws {
-        let data = try JSONEncoder().encode(session)
-        try saveData(data, account: sessionAccount)
+        var vault = loadVault()
+        if vault.session == session {
+            return
+        }
+        vault.session = session
+        try saveVault(vault)
     }
 
     static func loadSession() -> GoogleDriveSession? {
-        guard let data = loadData(account: sessionAccount) else { return nil }
-        return try? JSONDecoder().decode(GoogleDriveSession.self, from: data)
+        loadVault().session
     }
 
     static func deleteSession() {
-        deleteItem(account: sessionAccount)
+        var vault = loadVault()
+        guard vault.session != nil else { return }
+        vault.session = nil
+        if (vault.clientSecret ?? "").isEmpty {
+            deleteItem(account: vaultAccount)
+            lock.lock()
+            cachedVault = GoogleDriveVault()
+            hasLoadedVault = true
+            lock.unlock()
+        } else {
+            try? saveVault(vault)
+        }
     }
 
     static func saveClientSecret(_ secret: String) throws {
         let trimmed = secret.trimmingCharacters(in: .whitespacesAndNewlines)
-        if trimmed.isEmpty {
-            deleteItem(account: clientSecretAccount)
+        let normalized: String? = trimmed.isEmpty ? nil : trimmed
+        var vault = loadVault()
+        if vault.clientSecret == normalized {
             return
         }
-        try saveData(Data(trimmed.utf8), account: clientSecretAccount)
+        vault.clientSecret = normalized
+        if vault.session == nil && vault.clientSecret == nil {
+            deleteItem(account: vaultAccount)
+            lock.lock()
+            cachedVault = GoogleDriveVault()
+            hasLoadedVault = true
+            lock.unlock()
+        } else {
+            try saveVault(vault)
+        }
     }
 
     static func loadClientSecret() -> String {
-        guard let data = loadData(account: clientSecretAccount),
-              let secret = String(data: data, encoding: .utf8) else {
-            return ""
+        loadVault().clientSecret ?? ""
+    }
+
+    private static func loadVault() -> GoogleDriveVault {
+        lock.lock()
+        if hasLoadedVault {
+            let current = cachedVault
+            lock.unlock()
+            return current
         }
-        return secret
+        lock.unlock()
+
+        var loaded = GoogleDriveVault()
+        if let data = loadData(account: vaultAccount),
+           let decoded = try? JSONDecoder().decode(GoogleDriveVault.self, from: data) {
+            loaded = decoded
+        } else {
+            // Migrate any legacy split items into a single vault item once
+            var migrated = false
+            if let legacySessionData = loadData(account: legacySessionAccount),
+               let legacySession = try? JSONDecoder().decode(GoogleDriveSession.self, from: legacySessionData) {
+                loaded.session = legacySession
+                migrated = true
+            }
+            if let legacySecretData = loadData(account: legacyClientSecretAccount),
+               let legacySecret = String(data: legacySecretData, encoding: .utf8)?
+                .trimmingCharacters(in: .whitespacesAndNewlines),
+               !legacySecret.isEmpty {
+                loaded.clientSecret = legacySecret
+                migrated = true
+            }
+            if migrated {
+                try? writeVaultToKeychain(loaded)
+                deleteItem(account: legacySessionAccount)
+                deleteItem(account: legacyClientSecretAccount)
+            }
+        }
+
+        lock.lock()
+        cachedVault = loaded
+        hasLoadedVault = true
+        lock.unlock()
+        return loaded
+    }
+
+    private static func saveVault(_ vault: GoogleDriveVault) throws {
+        try writeVaultToKeychain(vault)
+        lock.lock()
+        cachedVault = vault
+        hasLoadedVault = true
+        lock.unlock()
+    }
+
+    private static func writeVaultToKeychain(_ vault: GoogleDriveVault) throws {
+        let data = try JSONEncoder().encode(vault)
+        try saveData(data, account: vaultAccount)
     }
 
     private static func saveData(_ data: Data, account: String) throws {

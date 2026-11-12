@@ -298,15 +298,21 @@ final class PreferencesWindowController: NSWindowController, NSWindowDelegate, N
 
     private func persistDriveTextFields() {
         let prefs = AppPreferences.shared
-        prefs.googleDriveClientID = clientIDField.stringValue
-        prefs.googleDriveClientSecret = clientSecretField.stringValue
+        let newClientID = clientIDField.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
+        if prefs.googleDriveClientID != newClientID {
+            prefs.googleDriveClientID = newClientID
+        }
+        let newSecret = clientSecretField.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
+        if prefs.googleDriveClientSecret != newSecret {
+            prefs.googleDriveClientSecret = newSecret
+        }
         let previousFolderName = prefs.googleDriveFolderName
         prefs.googleDriveFolderName = driveFolderNameField.stringValue
         let typedFolderID = driveFolderIDField.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
         if prefs.googleDriveFolderName != previousFolderName && typedFolderID == prefs.googleDriveFolderID {
             prefs.googleDriveFolderID = ""
             driveFolderIDField.stringValue = ""
-        } else {
+        } else if prefs.googleDriveFolderID != typedFolderID {
             prefs.googleDriveFolderID = typedFolderID
         }
     }
