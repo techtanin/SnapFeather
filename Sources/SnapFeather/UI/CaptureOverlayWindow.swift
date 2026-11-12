@@ -167,11 +167,15 @@ final class CaptureSessionCoordinator: CaptureSessionDelegate {
             closeAll()
             HUDToast.show(message: "Uploading to Google Drive...", symbolName: "icloud.and.arrow.up.fill")
             let filename = ImageExporter.defaultFilename(format: prefs.imageFormat)
+            let copyLink = prefs.copyShareLinkOnDriveUpload
+            let shareable = prefs.makeDriveFilesShareable || copyLink
             uploadToGoogleDrive(
                 image: image,
                 format: prefs.imageFormat,
                 filename: filename,
-                copyShareLink: prefs.makeDriveFilesShareable
+                makeShareable: shareable,
+                copyShareLink: copyLink,
+                presentAlertOnError: true
             )
 
         case .print:
@@ -208,28 +212,59 @@ final class CaptureSessionCoordinator: CaptureSessionDelegate {
         image: NSImage,
         format: ImageFormat,
         filename: String,
-        copyShareLink: Bool
+        makeShareable: Bool = AppPreferences.shared.makeDriveFilesShareable,
+        copyShareLink: Bool,
+        presentAlertOnError: Bool = false
     ) {
         Task { @MainActor in
             do {
                 let result = try await GoogleDriveService.shared.uploadScreenshot(
                     image: image,
                     format: format,
-                    filename: filename
+                    filename: filename,
+                    makeShareable: makeShareable
                 )
                 Diagnostics.log("Uploaded \(result.name) to Google Drive (id=\(result.fileId))")
-                if copyShareLink, let link = result.webViewLink {
+                if copyShareLink {
+                    let link = GoogleDriveService.resolvedShareURL(fileId: result.fileId, webViewLink: result.webViewLink)
                     let pb = NSPasteboard.general
                     pb.clearContents()
                     pb.setString(link, forType: .string)
-                    HUDToast.show(message: "Uploaded & link copied")
+                    let msg = result.sharingApplied ? "Uploaded & share URL copied" : "Uploaded & link copied (restricted)"
+                    HUDToast.show(message: msg)
                 } else if AppPreferences.shared.showDriveUploadNotification {
                     HUDToast.show(message: "Saved to Google Drive", symbolName: "icloud.and.arrow.up.fill")
                 }
             } catch {
                 Diagnostics.log("Google Drive upload error: \(error.localizedDescription)")
                 HUDToast.show(message: "Drive upload failed", symbolName: "exclamationmark.icloud.fill")
+                if presentAlertOnError || isDriveAuthError(error) {
+                    presentDriveUploadFailureAlert(error)
+                }
             }
+        }
+    }
+
+    private func isDriveAuthError(_ error: Error) -> Bool {
+        guard let driveError = error as? GoogleDriveError else { return false }
+        switch driveError {
+        case .missingClientID, .notAuthorized, .tokenExchangeFailed:
+            return true
+        case .invalidAuthURL, .uploadFailed, .encodingFailed:
+            return false
+        }
+    }
+
+    private func presentDriveUploadFailureAlert(_ error: Error) {
+        NSApp.activate(ignoringOtherApps: true)
+        let alert = NSAlert()
+        alert.alertStyle = .warning
+        alert.messageText = "Google Drive Upload Failed"
+        alert.informativeText = error.localizedDescription
+        alert.addButton(withTitle: "Open Drive Settings")
+        alert.addButton(withTitle: "OK")
+        if alert.runModal() == .alertFirstButtonReturn {
+            NotificationCenter.default.post(name: .snapFeatherOpenDrivePreferences, object: nil)
         }
     }
 }

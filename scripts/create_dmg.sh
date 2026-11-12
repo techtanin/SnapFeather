@@ -3,7 +3,7 @@ set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 APP_NAME="SnapFeather"
-APP_VERSION="${APP_VERSION:-1.0.3}"
+APP_VERSION="${APP_VERSION:-1.0.4}"
 DIST_DIR="$ROOT_DIR/dist"
 APP_BUNDLE="$DIST_DIR/${APP_NAME}.app"
 DMG_NAME="${APP_NAME}-v${APP_VERSION}-arm64.dmg"

@@ -80,6 +80,8 @@ struct SnapFeatherTests {
         defer { defaults.removePersistentDomain(forName: suiteName) }
 
         let prefs = AppPreferences(defaults: defaults)
+        #expect(prefs.copyShareLinkOnDriveUpload == true)
+        #expect(prefs.organizeDriveByDate == true)
         prefs.imageFormat = .webp
         prefs.showCrosshairs = false
         prefs.copyToClipboardOnSave = false
@@ -90,6 +92,8 @@ struct SnapFeatherTests {
         prefs.googleDriveFolderName = "My Screenshots"
         prefs.autoSaveToDriveOnCopy = true
         prefs.autoSaveToDriveOnSave = true
+        prefs.copyShareLinkOnDriveUpload = false
+        prefs.organizeDriveByDate = false
         prefs.makeDriveFilesShareable = true
         prefs.showDriveUploadNotification = false
 
@@ -111,12 +115,29 @@ struct SnapFeatherTests {
         #expect(reloaded.googleDriveFolderName == "My Screenshots")
         #expect(reloaded.autoSaveToDriveOnCopy == true)
         #expect(reloaded.autoSaveToDriveOnSave == true)
+        #expect(reloaded.copyShareLinkOnDriveUpload == false)
+        #expect(reloaded.organizeDriveByDate == false)
         #expect(reloaded.makeDriveFilesShareable == true)
         #expect(reloaded.showDriveUploadNotification == false)
     }
 
     @Test
     func googleDrivePKCEAndMultipartHelpers() {
+        var cal = Calendar(identifier: .gregorian)
+        cal.timeZone = TimeZone(secondsFromGMT: 0)!
+        let sampleDate = Date(timeIntervalSince1970: 1_773_014_400) // 2026-03-09 00:00:00 UTC
+        let dateParts = GoogleDriveService.dateFolderComponents(for: sampleDate, calendar: cal)
+        #expect(dateParts.year == "2026")
+        #expect(dateParts.month == "March")
+        #expect(dateParts.day == "09")
+        #expect(
+            GoogleDriveService.resolvedShareURL(fileId: "abc123", webViewLink: nil)
+                == "https://drive.google.com/file/d/abc123/view"
+        )
+        #expect(
+            GoogleDriveService.resolvedShareURL(fileId: "abc123", webViewLink: "https://drive.google.com/file/d/abc123/view?usp=drivesdk")
+                == "https://drive.google.com/file/d/abc123/view?usp=drivesdk"
+        )
         let encoded = GoogleDriveService.base64URLEncode(Data([0xFB, 0xFF, 0x3F]))
         #expect(!encoded.contains("+"))
         #expect(!encoded.contains("/"))

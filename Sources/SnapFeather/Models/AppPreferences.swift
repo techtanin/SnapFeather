@@ -79,9 +79,11 @@ final class AppPreferences {
         static let googleDriveClientSecret = "SnapFeather.googleDriveClientSecret"
         static let googleDriveFolderName = "SnapFeather.googleDriveFolderName"
         static let googleDriveFolderID = "SnapFeather.googleDriveFolderID"
+        static let organizeDriveByDate = "SnapFeather.organizeDriveByDate"
         static let autoSaveToDriveOnCopy = "SnapFeather.autoSaveToDriveOnCopy"
         static let autoSaveToDriveOnSave = "SnapFeather.autoSaveToDriveOnSave"
         static let makeDriveFilesShareable = "SnapFeather.makeDriveFilesShareable"
+        static let copyShareLinkOnDriveUpload = "SnapFeather.copyShareLinkOnDriveUpload"
         static let showDriveUploadNotification = "SnapFeather.showDriveUploadNotification"
     }
 
@@ -213,6 +215,11 @@ final class AppPreferences {
         set { defaults.set(newValue.trimmingCharacters(in: .whitespacesAndNewlines), forKey: Keys.googleDriveFolderID) }
     }
 
+    var organizeDriveByDate: Bool {
+        get { defaults.object(forKey: Keys.organizeDriveByDate) as? Bool ?? true }
+        set { defaults.set(newValue, forKey: Keys.organizeDriveByDate) }
+    }
+
     var autoSaveToDriveOnCopy: Bool {
         get { defaults.object(forKey: Keys.autoSaveToDriveOnCopy) as? Bool ?? false }
         set { defaults.set(newValue, forKey: Keys.autoSaveToDriveOnCopy) }
@@ -226,6 +233,11 @@ final class AppPreferences {
     var makeDriveFilesShareable: Bool {
         get { defaults.object(forKey: Keys.makeDriveFilesShareable) as? Bool ?? false }
         set { defaults.set(newValue, forKey: Keys.makeDriveFilesShareable) }
+    }
+
+    var copyShareLinkOnDriveUpload: Bool {
+        get { defaults.object(forKey: Keys.copyShareLinkOnDriveUpload) as? Bool ?? true }
+        set { defaults.set(newValue, forKey: Keys.copyShareLinkOnDriveUpload) }
     }
 
     var showDriveUploadNotification: Bool {

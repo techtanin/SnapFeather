@@ -6,6 +6,7 @@ struct DriveUploadResult: Sendable {
     let fileId: String
     let name: String
     let webViewLink: String?
+    let sharingApplied: Bool
 }
 
 enum GoogleDriveError: LocalizedError {
@@ -40,6 +41,8 @@ final class GoogleDriveService {
 
     private var activeServer: LoopbackOAuthServer?
     private var refreshTask: Task<String, Error>?
+    private var dateFolderCache: [String: String] = [:]
+    private var inFlightFolderTasks: [String: Task<String, Error>] = [:]
     private let urlSession: URLSession = {
         let config = URLSessionConfiguration.ephemeral
         config.urlCache = nil
@@ -71,6 +74,7 @@ final class GoogleDriveService {
         cancelPendingAuthorization()
         KeychainStore.deleteSession()
         session = nil
+        dateFolderCache.removeAll()
         AppPreferences.shared.googleDriveFolderID = ""
     }
 
@@ -134,15 +138,21 @@ final class GoogleDriveService {
     func uploadScreenshot(
         image: NSImage,
         format: ImageFormat,
-        filename: String
+        filename: String,
+        makeShareable: Bool? = nil
     ) async throws -> DriveUploadResult {
         guard let imageData = ImageExporter.encodedData(for: image, format: format) else {
             throw GoogleDriveError.encodingFailed
         }
-        return try await uploadData(imageData, mimeType: format.mimeType, filename: filename)
+        return try await uploadData(imageData, mimeType: format.mimeType, filename: filename, makeShareable: makeShareable)
     }
 
-    func uploadData(_ data: Data, mimeType: String, filename: String) async throws -> DriveUploadResult {
+    func uploadData(
+        _ data: Data,
+        mimeType: String,
+        filename: String,
+        makeShareable: Bool? = nil
+    ) async throws -> DriveUploadResult {
         let accessToken = try await ensureValidAccessToken()
         let folderID = try await resolveTargetFolderID(accessToken: accessToken)
 
@@ -174,6 +184,7 @@ final class GoogleDriveService {
         // If cached folder ID was deleted externally, clear cache and retry once
         if http.statusCode == 404 {
             AppPreferences.shared.googleDriveFolderID = ""
+            dateFolderCache.removeAll()
             let freshFolderID = try await resolveTargetFolderID(accessToken: accessToken)
             let retryMeta = try JSONSerialization.data(withJSONObject: ["name": filename, "parents": [freshFolderID]])
             request.httpBody = Self.buildMultipartBody(
@@ -187,7 +198,7 @@ final class GoogleDriveService {
                 let msg = String(data: retryData, encoding: .utf8) ?? "HTTP \((retryResp as? HTTPURLResponse)?.statusCode ?? 0)"
                 throw GoogleDriveError.uploadFailed(msg)
             }
-            return try await finalizeUpload(responseData: retryData, accessToken: accessToken)
+            return try await finalizeUpload(responseData: retryData, accessToken: accessToken, makeShareable: makeShareable)
         }
 
         guard (200...299).contains(http.statusCode) else {
@@ -195,10 +206,17 @@ final class GoogleDriveService {
             throw GoogleDriveError.uploadFailed(msg)
         }
 
-        return try await finalizeUpload(responseData: responseData, accessToken: accessToken)
+        return try await finalizeUpload(responseData: responseData, accessToken: accessToken, makeShareable: makeShareable)
     }
 
-    private func finalizeUpload(responseData: Data, accessToken: String) async throws -> DriveUploadResult {
+    nonisolated static func resolvedShareURL(fileId: String, webViewLink: String?) -> String {
+        if let webViewLink, !webViewLink.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            return webViewLink
+        }
+        return "https://drive.google.com/file/d/\(fileId)/view"
+    }
+
+    private func finalizeUpload(responseData: Data, accessToken: String, makeShareable: Bool?) async throws -> DriveUploadResult {
         struct FileResponse: Decodable {
             let id: String
             let name: String
@@ -206,14 +224,21 @@ final class GoogleDriveService {
         }
         let decoded = try JSONDecoder().decode(FileResponse.self, from: responseData)
 
-        if AppPreferences.shared.makeDriveFilesShareable {
-            try? await makeFilePubliclyReadable(fileID: decoded.id, accessToken: accessToken)
+        var sharingApplied = true
+        if makeShareable ?? AppPreferences.shared.makeDriveFilesShareable {
+            do {
+                try await makeFilePubliclyReadable(fileID: decoded.id, accessToken: accessToken)
+            } catch {
+                sharingApplied = false
+                Diagnostics.log("Could not set anyone-with-link permission: \(error.localizedDescription)")
+            }
         }
 
         return DriveUploadResult(
             fileId: decoded.id,
             name: decoded.name,
-            webViewLink: decoded.webViewLink
+            webViewLink: Self.resolvedShareURL(fileId: decoded.id, webViewLink: decoded.webViewLink),
+            sharingApplied: sharingApplied
         )
     }
 
@@ -294,15 +319,94 @@ final class GoogleDriveService {
             .replacingOccurrences(of: "'", with: "\\'")
     }
 
-    private func resolveTargetFolderID(accessToken: String) async throws -> String {
+    nonisolated static func dateFolderComponents(
+        for date: Date,
+        calendar: Calendar = .current
+    ) -> (year: String, month: String, day: String) {
+        let comps = calendar.dateComponents([.year, .month, .day], from: date)
+        let year = String(format: "%04d", comps.year ?? 1970)
+        let day = String(format: "%02d", comps.day ?? 1)
+
+        let monthFormatter = DateFormatter()
+        monthFormatter.calendar = calendar
+        monthFormatter.timeZone = calendar.timeZone
+        monthFormatter.locale = Locale(identifier: "en_US_POSIX")
+        monthFormatter.dateFormat = "MMMM"
+        let month = monthFormatter.string(from: date)
+
+        return (year, month, day)
+    }
+
+    private func resolveTargetFolderID(accessToken: String, date: Date = Date()) async throws -> String {
+        let mainFolderID = try await resolveMainFolderID(accessToken: accessToken)
+        guard AppPreferences.shared.organizeDriveByDate else {
+            return mainFolderID
+        }
+
+        let parts = Self.dateFolderComponents(for: date)
+        let yearKey = "\(mainFolderID)/\(parts.year)"
+        let monthKey = "\(yearKey)/\(parts.month)"
+        let dayKey = "\(monthKey)/\(parts.day)"
+
+        if let cachedDayID = dateFolderCache[dayKey] {
+            return cachedDayID
+        }
+
+        let yearID: String
+        if let cachedYearID = dateFolderCache[yearKey] {
+            yearID = cachedYearID
+        } else {
+            yearID = try await resolveOrCreateFolder(named: parts.year, parentID: mainFolderID, accessToken: accessToken)
+            dateFolderCache[yearKey] = yearID
+        }
+
+        let monthID: String
+        if let cachedMonthID = dateFolderCache[monthKey] {
+            monthID = cachedMonthID
+        } else {
+            monthID = try await resolveOrCreateFolder(named: parts.month, parentID: yearID, accessToken: accessToken)
+            dateFolderCache[monthKey] = monthID
+        }
+
+        let dayID = try await resolveOrCreateFolder(named: parts.day, parentID: monthID, accessToken: accessToken)
+        dateFolderCache[dayKey] = dayID
+        return dayID
+    }
+
+    private func resolveMainFolderID(accessToken: String) async throws -> String {
         let cachedID = AppPreferences.shared.googleDriveFolderID
         if !cachedID.isEmpty {
             return cachedID
         }
 
         let folderName = AppPreferences.shared.googleDriveFolderName
+        let id = try await resolveOrCreateFolder(named: folderName, parentID: nil, accessToken: accessToken)
+        AppPreferences.shared.googleDriveFolderID = id
+        return id
+    }
+
+    private func resolveOrCreateFolder(named folderName: String, parentID: String?, accessToken: String) async throws -> String {
+        let taskKey = "\(parentID ?? "root")/\(folderName)"
+        if let existingTask = inFlightFolderTasks[taskKey] {
+            return try await existingTask.value
+        }
+
+        let task = Task<String, Error> { @MainActor [weak self] in
+            guard let self else { throw GoogleDriveError.notAuthorized }
+            defer { self.inFlightFolderTasks.removeValue(forKey: taskKey) }
+            return try await self.performResolveOrCreateFolder(named: folderName, parentID: parentID, accessToken: accessToken)
+        }
+        inFlightFolderTasks[taskKey] = task
+        return try await task.value
+    }
+
+    private func performResolveOrCreateFolder(named folderName: String, parentID: String?, accessToken: String) async throws -> String {
         let escapedName = Self.escapeDriveQueryValue(folderName)
-        let query = "name='\(escapedName)' and mimeType='application/vnd.google-apps.folder' and trashed=false"
+        var query = "name='\(escapedName)' and mimeType='application/vnd.google-apps.folder' and trashed=false"
+        if let parentID {
+            let escapedParent = Self.escapeDriveQueryValue(parentID)
+            query += " and '\(escapedParent)' in parents"
+        }
 
         var components = URLComponents(string: "https://www.googleapis.com/drive/v3/files")!
         components.queryItems = [
@@ -315,15 +419,20 @@ final class GoogleDriveService {
         searchReq.setValue("Bearer \(accessToken)", forHTTPHeaderField: "Authorization")
 
         let (searchData, searchResp) = try await urlSession.data(for: searchReq)
-        if let http = searchResp as? HTTPURLResponse, (200...299).contains(http.statusCode) {
-            struct FolderList: Decodable {
-                struct Folder: Decodable { let id: String }
-                let files: [Folder]
-            }
-            if let existing = try? JSONDecoder().decode(FolderList.self, from: searchData).files.first {
-                AppPreferences.shared.googleDriveFolderID = existing.id
-                return existing.id
-            }
+        guard let searchHTTP = searchResp as? HTTPURLResponse else {
+            throw GoogleDriveError.uploadFailed("Invalid Drive search response.")
+        }
+        guard (200...299).contains(searchHTTP.statusCode) else {
+            let msg = String(data: searchData, encoding: .utf8) ?? "HTTP \(searchHTTP.statusCode)"
+            throw GoogleDriveError.uploadFailed("Folder lookup failed: \(msg)")
+        }
+
+        struct FolderList: Decodable {
+            struct Folder: Decodable { let id: String }
+            let files: [Folder]
+        }
+        if let existing = try? JSONDecoder().decode(FolderList.self, from: searchData).files.first {
+            return existing.id
         }
 
         // Create folder if not found
@@ -331,10 +440,14 @@ final class GoogleDriveService {
         createReq.httpMethod = "POST"
         createReq.setValue("Bearer \(accessToken)", forHTTPHeaderField: "Authorization")
         createReq.setValue("application/json", forHTTPHeaderField: "Content-Type")
-        createReq.httpBody = try JSONSerialization.data(withJSONObject: [
+        var body: [String: Any] = [
             "name": folderName,
             "mimeType": "application/vnd.google-apps.folder"
-        ])
+        ]
+        if let parentID {
+            body["parents"] = [parentID]
+        }
+        createReq.httpBody = try JSONSerialization.data(withJSONObject: body)
 
         let (createData, createResp) = try await urlSession.data(for: createReq)
         guard let createHTTP = createResp as? HTTPURLResponse, (200...299).contains(createHTTP.statusCode) else {
@@ -343,7 +456,6 @@ final class GoogleDriveService {
         }
         struct CreatedFolder: Decodable { let id: String }
         let created = try JSONDecoder().decode(CreatedFolder.self, from: createData)
-        AppPreferences.shared.googleDriveFolderID = created.id
         return created.id
     }
 
@@ -398,6 +510,11 @@ final class GoogleDriveService {
         let (data, response) = try await urlSession.data(for: req)
         guard let http = response as? HTTPURLResponse, (200...299).contains(http.statusCode) else {
             let msg = String(data: data, encoding: .utf8) ?? "HTTP error"
+            if msg.localizedCaseInsensitiveContains("client_secret is missing") {
+                throw GoogleDriveError.tokenExchangeFailed(
+                    "Google OAuth Client Secret is missing. Open Preferences > Google Drive, paste your Client Secret, and Re-authorize."
+                )
+            }
             throw GoogleDriveError.tokenExchangeFailed(msg)
         }
         return try JSONDecoder().decode(TokenResponse.self, from: data)

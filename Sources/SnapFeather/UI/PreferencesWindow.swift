@@ -26,14 +26,16 @@ final class PreferencesWindowController: NSWindowController, NSWindowDelegate, N
     private let driveFolderIDField = NSTextField(string: "")
     private let autoSaveOnCopyCheckbox = NSButton(checkboxWithTitle: "Auto-save to Google Drive after copying image", target: nil, action: nil)
     private let autoSaveOnSaveCheckbox = NSButton(checkboxWithTitle: "Auto-save to Google Drive after saving locally", target: nil, action: nil)
-    private let shareableCheckbox = NSButton(checkboxWithTitle: "Make uploaded files shareable (Anyone with link)", target: nil, action: nil)
+    private let copyLinkOnUploadCheckbox = NSButton(checkboxWithTitle: "On Upload button: make shareable & copy URL to clipboard", target: nil, action: nil)
+    private let organizeByDateCheckbox = NSButton(checkboxWithTitle: "Organize uploads by date (Year / Month / Day)", target: nil, action: nil)
+    private let shareableCheckbox = NSButton(checkboxWithTitle: "Make all uploaded files shareable (Anyone with link)", target: nil, action: nil)
     private let driveToastCheckbox = NSButton(checkboxWithTitle: "Show notification toast after Drive upload", target: nil, action: nil)
 
     init(onShortcutChanged: @escaping @MainActor (HotKeyShortcut) -> Void) {
         self.onShortcutChanged = onShortcutChanged
 
         let window = NSWindow(
-            contentRect: NSRect(x: 0, y: 0, width: 540, height: 430),
+            contentRect: NSRect(x: 0, y: 0, width: 540, height: 480),
             styleMask: [.titled, .closable],
             backing: .buffered,
             defer: false
@@ -71,6 +73,9 @@ final class PreferencesWindowController: NSWindowController, NSWindowDelegate, N
     }
 
     private func refreshDriveStatus() {
+        if window?.firstResponder !== driveFolderIDField.currentEditor() {
+            driveFolderIDField.stringValue = AppPreferences.shared.googleDriveFolderID
+        }
         if GoogleDriveService.shared.isAuthorized {
             let email = GoogleDriveService.shared.connectedEmail ?? "Authorized Account"
             driveStatusLabel.stringValue = "Connected: \(email)"
@@ -201,7 +206,7 @@ final class PreferencesWindowController: NSWindowController, NSWindowDelegate, N
         clientIDField.translatesAutoresizingMaskIntoConstraints = false
         clientIDField.widthAnchor.constraint(equalToConstant: 320).isActive = true
 
-        clientSecretField.placeholderString = "Optional (if provided by Desktop OAuth client)"
+        clientSecretField.placeholderString = "Required for Google Desktop OAuth client (from Cloud Console)"
         clientSecretField.delegate = self
         clientSecretField.target = self
         clientSecretField.action = #selector(driveFieldsChanged)
@@ -228,6 +233,12 @@ final class PreferencesWindowController: NSWindowController, NSWindowDelegate, N
         autoSaveOnSaveCheckbox.target = self
         autoSaveOnSaveCheckbox.action = #selector(driveCheckboxesChanged)
 
+        copyLinkOnUploadCheckbox.target = self
+        copyLinkOnUploadCheckbox.action = #selector(driveCheckboxesChanged)
+
+        organizeByDateCheckbox.target = self
+        organizeByDateCheckbox.action = #selector(driveCheckboxesChanged)
+
         shareableCheckbox.target = self
         shareableCheckbox.action = #selector(driveCheckboxesChanged)
 
@@ -235,6 +246,8 @@ final class PreferencesWindowController: NSWindowController, NSWindowDelegate, N
         driveToastCheckbox.action = #selector(driveCheckboxesChanged)
 
         let optionsStack = NSStackView(views: [
+            copyLinkOnUploadCheckbox,
+            organizeByDateCheckbox,
             autoSaveOnCopyCheckbox,
             autoSaveOnSaveCheckbox,
             shareableCheckbox,
@@ -290,6 +303,8 @@ final class PreferencesWindowController: NSWindowController, NSWindowDelegate, N
         driveFolderIDField.stringValue = prefs.googleDriveFolderID
         autoSaveOnCopyCheckbox.state = prefs.autoSaveToDriveOnCopy ? .on : .off
         autoSaveOnSaveCheckbox.state = prefs.autoSaveToDriveOnSave ? .on : .off
+        copyLinkOnUploadCheckbox.state = prefs.copyShareLinkOnDriveUpload ? .on : .off
+        organizeByDateCheckbox.state = prefs.organizeDriveByDate ? .on : .off
         shareableCheckbox.state = prefs.makeDriveFilesShareable ? .on : .off
         driveToastCheckbox.state = prefs.showDriveUploadNotification ? .on : .off
 
@@ -375,6 +390,8 @@ final class PreferencesWindowController: NSWindowController, NSWindowDelegate, N
         let prefs = AppPreferences.shared
         prefs.autoSaveToDriveOnCopy = (autoSaveOnCopyCheckbox.state == .on)
         prefs.autoSaveToDriveOnSave = (autoSaveOnSaveCheckbox.state == .on)
+        prefs.copyShareLinkOnDriveUpload = (copyLinkOnUploadCheckbox.state == .on)
+        prefs.organizeDriveByDate = (organizeByDateCheckbox.state == .on)
         prefs.makeDriveFilesShareable = (shareableCheckbox.state == .on)
         prefs.showDriveUploadNotification = (driveToastCheckbox.state == .on)
     }
