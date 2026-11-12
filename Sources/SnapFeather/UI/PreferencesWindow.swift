@@ -1,7 +1,7 @@
 import AppKit
 
 @MainActor
-final class PreferencesWindowController: NSWindowController, NSWindowDelegate {
+final class PreferencesWindowController: NSWindowController, NSWindowDelegate, NSTextFieldDelegate {
     private let onShortcutChanged: @MainActor (HotKeyShortcut) -> Void
 
     private let tabView = NSTabView()
@@ -15,6 +15,7 @@ final class PreferencesWindowController: NSWindowController, NSWindowDelegate {
     private let permissionStatusLabel = NSTextField(labelWithString: "")
 
     // Google Drive tab
+    private var isAuthorizing = false
     private let driveStatusLabel = NSTextField(labelWithString: "")
     private let authorizeButton = NSButton(title: "Authorize Google Drive", target: nil, action: nil)
     private let disconnectButton = NSButton(title: "Disconnect", target: nil, action: nil)
@@ -194,24 +195,28 @@ final class PreferencesWindowController: NSWindowController, NSWindowDelegate {
         authRow.spacing = 8
 
         clientIDField.placeholderString = "xxxxxxxxxxxx.apps.googleusercontent.com"
+        clientIDField.delegate = self
         clientIDField.target = self
         clientIDField.action = #selector(driveFieldsChanged)
         clientIDField.translatesAutoresizingMaskIntoConstraints = false
         clientIDField.widthAnchor.constraint(equalToConstant: 320).isActive = true
 
         clientSecretField.placeholderString = "Optional (if provided by Desktop OAuth client)"
+        clientSecretField.delegate = self
         clientSecretField.target = self
         clientSecretField.action = #selector(driveFieldsChanged)
         clientSecretField.translatesAutoresizingMaskIntoConstraints = false
         clientSecretField.widthAnchor.constraint(equalToConstant: 320).isActive = true
 
         driveFolderNameField.placeholderString = "SnapFeather Screenshots"
+        driveFolderNameField.delegate = self
         driveFolderNameField.target = self
         driveFolderNameField.action = #selector(driveFolderNameChanged)
         driveFolderNameField.translatesAutoresizingMaskIntoConstraints = false
         driveFolderNameField.widthAnchor.constraint(equalToConstant: 320).isActive = true
 
         driveFolderIDField.placeholderString = "Auto-resolved (or paste existing Drive Folder ID)"
+        driveFolderIDField.delegate = self
         driveFolderIDField.target = self
         driveFolderIDField.action = #selector(driveFieldsChanged)
         driveFolderIDField.translatesAutoresizingMaskIntoConstraints = false
@@ -368,27 +373,39 @@ final class PreferencesWindowController: NSWindowController, NSWindowDelegate {
         prefs.showDriveUploadNotification = (driveToastCheckbox.state == .on)
     }
 
+    func controlTextDidChange(_ obj: Notification) {
+        persistDriveTextFields()
+    }
+
     @objc private func authorizeGoogleDrive() {
+        if isAuthorizing {
+            GoogleDriveService.shared.cancelPendingAuthorization()
+            return
+        }
+
         persistDriveTextFields()
         let clientID = AppPreferences.shared.googleDriveClientID
         let clientSecret = AppPreferences.shared.googleDriveClientSecret
 
-        authorizeButton.isEnabled = false
+        isAuthorizing = true
+        authorizeButton.title = "Cancel Auth"
         authSpinner.startAnimation(nil)
 
         Task { @MainActor [weak self] in
             guard let self else { return }
             defer {
-                self.authorizeButton.isEnabled = true
+                self.isAuthorizing = false
                 self.authSpinner.stopAnimation(nil)
+                self.refreshDriveStatus()
             }
             do {
                 _ = try await GoogleDriveService.shared.authorize(
                     clientID: clientID,
                     clientSecret: clientSecret
                 )
-                self.refreshDriveStatus()
                 HUDToast.show(message: "Google Drive connected")
+            } catch LoopbackOAuthError.cancelled {
+                HUDToast.show(message: "Google Drive auth cancelled", symbolName: "xmark.circle.fill")
             } catch {
                 let alert = NSAlert()
                 alert.alertStyle = .warning

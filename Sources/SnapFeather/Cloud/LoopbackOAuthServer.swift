@@ -6,6 +6,7 @@ enum LoopbackOAuthError: LocalizedError {
     case bindFailed
     case listenFailed
     case cancelled
+    case timedOut
     case missingAuthorizationCode
     case stateMismatch
     case authorizationDenied(String)
@@ -20,6 +21,8 @@ enum LoopbackOAuthError: LocalizedError {
             return "Could not listen for Google OAuth callback."
         case .cancelled:
             return "Google Drive authorization was cancelled."
+        case .timedOut:
+            return "Google Drive authorization timed out after 3 minutes."
         case .missingAuthorizationCode:
             return "Google OAuth callback did not contain an authorization code."
         case .stateMismatch:
@@ -86,14 +89,34 @@ final class LoopbackOAuthServer: @unchecked Sendable {
         "http://127.0.0.1:\(port)/callback"
     }
 
-    func waitForCallback(expectedState: String) async throws -> String {
+    func waitForCallback(expectedState: String, timeoutSeconds: TimeInterval = 180) async throws -> String {
         try await withCheckedThrowingContinuation { continuation in
             DispatchQueue.global(qos: .userInitiated).async { [self] in
+                let deadline = Date().addingTimeInterval(timeoutSeconds)
                 while true {
                     lock.lock()
                     let stopped = isStopped
                     lock.unlock()
                     if stopped {
+                        continuation.resume(throwing: LoopbackOAuthError.cancelled)
+                        return
+                    }
+
+                    let remainingMs = Int32(max(0, deadline.timeIntervalSinceNow * 1000))
+                    if remainingMs == 0 {
+                        stop()
+                        continuation.resume(throwing: LoopbackOAuthError.timedOut)
+                        return
+                    }
+
+                    var pfd = pollfd(fd: listenFD, events: Int16(POLLIN), revents: 0)
+                    let pollResult = Darwin.poll(&pfd, 1, min(remainingMs, 1000))
+                    if pollResult == 0 {
+                        continue
+                    }
+                    if pollResult < 0 {
+                        if errno == EINTR { continue }
+                        stop()
                         continuation.resume(throwing: LoopbackOAuthError.cancelled)
                         return
                     }

@@ -867,8 +867,9 @@ final class CaptureCanvasView: NSView, FloatingToolbarsDelegate, NSTextFieldDele
 
         let fieldWidth = max(140, min(280, sel.maxX - point.x - 8))
         let fieldHeight = max(28, ceil(activeTextFontSize * 1.45) + 8)
-        let field = NSTextField(frame: NSRect(x: point.x, y: point.y - 4, width: fieldWidth, height: fieldHeight))
-        field.font = NSFont.systemFont(ofSize: activeTextFontSize, weight: .semibold)
+        let fieldY = min(max(point.y - 4, 4), bounds.height - fieldHeight - 4)
+        let field = NSTextField(frame: NSRect(x: point.x, y: fieldY, width: fieldWidth, height: fieldHeight))
+        field.font = NSFont.systemFont(ofSize: round(activeTextFontSize), weight: .semibold)
         field.textColor = activeColor
         field.backgroundColor = NSColor.black.withAlphaComponent(0.45)
         field.isBordered = true
@@ -1087,22 +1088,22 @@ final class CaptureCanvasView: NSView, FloatingToolbarsDelegate, NSTextFieldDele
 
     private func adjustActiveSize(by delta: CGFloat) {
         if activeTool == .text || activeTextField != nil {
-            let newSize = min(max(activeTextFontSize + delta * 1.5, 12.0), 72.0)
-            activeTextFontSize = round(newSize)
-            AppPreferences.shared.textFontSize = activeTextFontSize
-            verticalToolbar.selectedTextFontSize = activeTextFontSize
+            activeTextFontSize = min(max(activeTextFontSize + delta * 1.5, 12.0), 72.0)
+            let displayFontSize = round(activeTextFontSize)
+            AppPreferences.shared.textFontSize = displayFontSize
+            verticalToolbar.selectedTextFontSize = displayFontSize
             updateActiveTextFieldFont()
-            showSizeIndicator("Text: \(Int(activeTextFontSize)) pt")
+            showSizeIndicator("Text: \(Int(displayFontSize)) pt")
         } else {
-            let newWidth = min(max(activeLineWidth + delta * 0.5, 1.0), 24.0)
-            activeLineWidth = (round(newWidth * 2.0) / 2.0)
+            activeLineWidth = min(max(activeLineWidth + delta * 0.5, 1.0), 24.0)
+            let roundedDisplay = (round(activeLineWidth * 2.0) / 2.0)
             AppPreferences.shared.strokeWidth = activeLineWidth
             verticalToolbar.selectedLineWidth = activeLineWidth
             if activeTool == .marker {
                 let markerPx = Int(round(max(activeLineWidth * 4.5, 14.0)))
                 showSizeIndicator("Marker: \(markerPx) px")
             } else {
-                showSizeIndicator(String(format: "Brush: %.1f pt", activeLineWidth))
+                showSizeIndicator(String(format: "Brush: %.1f pt", roundedDisplay))
             }
         }
         needsDisplay = true
@@ -1110,9 +1111,10 @@ final class CaptureCanvasView: NSView, FloatingToolbarsDelegate, NSTextFieldDele
 
     private func updateActiveTextFieldFont() {
         guard let field = activeTextField else { return }
-        field.font = NSFont.systemFont(ofSize: activeTextFontSize, weight: .semibold)
+        let roundedSize = round(activeTextFontSize)
+        field.font = NSFont.systemFont(ofSize: roundedSize, weight: .semibold)
         var frame = field.frame
-        frame.size.height = max(28, ceil(activeTextFontSize * 1.45) + 8)
+        frame.size.height = max(28, ceil(roundedSize * 1.45) + 8)
         field.frame = frame
     }
 
