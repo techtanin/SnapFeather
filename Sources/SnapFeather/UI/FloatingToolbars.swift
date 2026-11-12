@@ -45,6 +45,11 @@ class ToolbarIconButton: NSButton {
         fatalError("init(coder:) has not been implemented")
     }
 
+    override func resetCursorRects() {
+        super.resetCursorRects()
+        addCursorRect(bounds, cursor: .pointingHand)
+    }
+
     override func updateTrackingAreas() {
         super.updateTrackingAreas()
         if let trackingAreaRef {
@@ -62,11 +67,13 @@ class ToolbarIconButton: NSButton {
 
     override func mouseEntered(with event: NSEvent) {
         isHovered = true
+        NSCursor.pointingHand.set()
         updateAppearance()
     }
 
     override func mouseExited(with event: NSEvent) {
         isHovered = false
+        NSCursor.arrow.set()
         updateAppearance()
     }
 
@@ -101,6 +108,11 @@ class FloatingToolbarPanel: NSVisualEffectView {
     @available(*, unavailable)
     required init?(coder: NSCoder) {
         fatalError("init(coder:) has not been implemented")
+    }
+
+    override func resetCursorRects() {
+        super.resetCursorRects()
+        addCursorRect(bounds, cursor: .arrow)
     }
 }
 
@@ -424,6 +436,11 @@ private final class ActionPillButton: NSButton {
         return bounds.contains(local) ? self : nil
     }
 
+    override func resetCursorRects() {
+        super.resetCursorRects()
+        addCursorRect(bounds, cursor: .pointingHand)
+    }
+
     override func updateTrackingAreas() {
         super.updateTrackingAreas()
         if let trackingAreaRef {
@@ -440,10 +457,12 @@ private final class ActionPillButton: NSButton {
     }
 
     override func mouseEntered(with event: NSEvent) {
+        NSCursor.pointingHand.set()
         layer?.backgroundColor = NSColor.controlAccentColor.cgColor
     }
 
     override func mouseExited(with event: NSEvent) {
+        NSCursor.arrow.set()
         layer?.backgroundColor = NSColor.controlAccentColor.withAlphaComponent(0.92).cgColor
     }
 
@@ -769,6 +788,11 @@ private final class SwatchButton: NSButton {
         fatalError("init(coder:) has not been implemented")
     }
 
+    override func resetCursorRects() {
+        super.resetCursorRects()
+        addCursorRect(bounds, cursor: .pointingHand)
+    }
+
     private func updateAppearance() {
         checkmarkView.isHidden = !isSelectedSwatch
         if let srgb = swatchColor.usingColorSpace(.sRGB) {
@@ -827,6 +851,11 @@ private final class SizePillButton: NSButton {
     @available(*, unavailable)
     required init?(coder: NSCoder) {
         fatalError("init(coder:) has not been implemented")
+    }
+
+    override func resetCursorRects() {
+        super.resetCursorRects()
+        addCursorRect(bounds, cursor: .pointingHand)
     }
 
     override func hitTest(_ point: NSPoint) -> NSView? {

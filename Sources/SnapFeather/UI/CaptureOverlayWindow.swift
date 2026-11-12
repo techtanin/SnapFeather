@@ -604,6 +604,11 @@ final class CaptureCanvasView: NSView, FloatingToolbarsDelegate, NSTextFieldDele
 
     override func mouseMoved(with event: NSEvent) {
         let pt = convert(event.locationInWindow, from: nil)
+        let overVertical = !verticalToolbar.isHidden && verticalToolbar.frame.contains(pt)
+        let overHorizontal = !horizontalToolbar.isHidden && horizontalToolbar.frame.contains(pt)
+        if overVertical || overHorizontal {
+            return
+        }
         hoverPoint = pt
         updateCursor(at: pt)
         if selectionRect == nil || (activeTool != .select && activeTool != .text) {
@@ -1085,6 +1090,9 @@ final class CaptureCanvasView: NSView, FloatingToolbarsDelegate, NSTextFieldDele
         var vY = sel.maxY - vSize.height
         vY = min(max(vY, margin), bounds.height - vSize.height - margin)
         verticalToolbar.setFrameOrigin(CGPoint(x: vX, y: vY))
+
+        window?.invalidateCursorRects(for: verticalToolbar)
+        window?.invalidateCursorRects(for: horizontalToolbar)
     }
 
     // MARK: - FloatingToolbarsDelegate
