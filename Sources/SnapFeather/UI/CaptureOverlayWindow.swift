@@ -272,23 +272,18 @@ final class CaptureOverlayWindow: NSWindow {
     }
 }
 
-private enum ResizeHandle: CaseIterable {
-    case topLeft, top, topRight
-    case left, right
-    case bottomLeft, bottom, bottomRight
-}
-
 private enum DragMode {
     case none
     case creatingSelection(anchor: CGPoint)
     case movingSelection(startPoint: CGPoint, initialRect: CGRect)
     case movingAnnotation(index: Int, startPoint: CGPoint, originalItem: AnnotationItem)
-    case resizingSelection(handle: ResizeHandle, initialRect: CGRect)
+    case resizingAnnotation(index: Int, handle: AnnotationHandleKind, originalItem: AnnotationItem)
+    case resizingSelection(handle: BoxResizeHandle, initialRect: CGRect)
     case drawingAnnotation
 }
 
 @MainActor
-final class CaptureCanvasView: NSView, FloatingToolbarsDelegate, NSTextFieldDelegate {
+final class CaptureCanvasView: NSView, FloatingToolbarsDelegate {
     weak var ownerWindow: CaptureOverlayWindow?
     private weak var coordinator: CaptureSessionCoordinator?
 
@@ -299,6 +294,7 @@ final class CaptureCanvasView: NSView, FloatingToolbarsDelegate, NSTextFieldDele
         didSet { updateToolbarsLayout() }
     }
     private var hoverPoint: CGPoint?
+    private var lastDragPoint: CGPoint?
     private var dragMode: DragMode = .none
 
     private var activeTool: AnnotationTool = .select
@@ -310,19 +306,22 @@ final class CaptureCanvasView: NSView, FloatingToolbarsDelegate, NSTextFieldDele
     private var sizeIndicatorTask: Task<Void, Never>?
 
     private var annotations: [AnnotationItem] = []
+    private var history = AnnotationHistory()
+    private var dragStartAnnotations: [AnnotationItem]?
+    private var lastCoalescedEdit: (key: String, at: Date)?
     private var inProgressItem: AnnotationItem?
     private var selectedAnnotationIndex: Int?
 
     private let verticalToolbar = VerticalAnnotationToolbar()
     private let horizontalToolbar = HorizontalActionToolbar()
-    private var activeTextField: NSTextField?
-    private var activeTextOrigin: CGPoint = .zero
+    private var activeTextEditor: InlineTextEditorView?
+    private var editingAnnotationIndex: Int?
 
     private let handleSize: CGFloat = 8.0
 
     override var isFlipped: Bool { true }
     override var acceptsFirstResponder: Bool { true }
-    var hasActiveTextInput: Bool { activeTextField != nil }
+    var hasActiveTextInput: Bool { activeTextEditor != nil }
 
     init(frame frameRect: NSRect, snapshot: ScreenSnapshot, coordinator: CaptureSessionCoordinator) {
         self.snapshot = snapshot
@@ -357,11 +356,15 @@ final class CaptureCanvasView: NSView, FloatingToolbarsDelegate, NSTextFieldDele
     }
 
     func clearSelection() {
-        commitActiveTextField()
+        commitActiveTextEditor()
         selectionRect = nil
         annotations.removeAll()
+        history.clear()
+        dragStartAnnotations = nil
+        lastCoalescedEdit = nil
         inProgressItem = nil
         selectedAnnotationIndex = nil
+        updateHistoryButtons()
         needsDisplay = true
     }
 
@@ -394,11 +397,16 @@ final class CaptureCanvasView: NSView, FloatingToolbarsDelegate, NSTextFieldDele
             // Clip and draw annotations inside selection
             ctx.saveGState()
             ctx.clip(to: sel)
-            for item in annotations {
+            for (index, item) in annotations.enumerated() {
+                if index == editingAnnotationIndex, activeTextEditor != nil {
+                    continue
+                }
                 item.draw(in: ctx)
             }
             inProgressItem?.draw(in: ctx)
-            if let idx = selectedAnnotationIndex, annotations.indices.contains(idx) {
+            if let idx = selectedAnnotationIndex,
+               annotations.indices.contains(idx),
+               !(idx == editingAnnotationIndex && activeTextEditor != nil) {
                 drawAnnotationSelectionHighlight(for: annotations[idx], in: ctx)
             }
             ctx.restoreGState()
@@ -416,7 +424,7 @@ final class CaptureCanvasView: NSView, FloatingToolbarsDelegate, NSTextFieldDele
             ctx.restoreGState()
 
             // 8 resize handles
-            for handle in ResizeHandle.allCases {
+            for handle in BoxResizeHandle.allCases {
                 let hr = handleRect(for: handle, in: sel)
                 ctx.saveGState()
                 ctx.setFillColor(NSColor.white.cgColor)
@@ -497,28 +505,39 @@ final class CaptureCanvasView: NSView, FloatingToolbarsDelegate, NSTextFieldDele
     }
 
     private func drawAnnotationSelectionHighlight(for item: AnnotationItem, in ctx: CGContext) {
-        let box = item.boundingBox.insetBy(dx: -5, dy: -5)
         ctx.saveGState()
         ctx.setStrokeColor(NSColor.systemCyan.withAlphaComponent(0.95).cgColor)
         ctx.setLineWidth(1.5)
         ctx.setLineDash(phase: 0, lengths: [4, 3])
-        ctx.stroke(box)
-        ctx.setLineDash(phase: 0, lengths: [])
 
-        let dot: CGFloat = 5
-        let corners = [
-            CGPoint(x: box.minX, y: box.minY),
-            CGPoint(x: box.maxX, y: box.minY),
-            CGPoint(x: box.minX, y: box.maxY),
-            CGPoint(x: box.maxX, y: box.maxY)
-        ]
+        switch item {
+        case .shape(let shape) where shape.kind == .line || shape.kind == .arrow:
+            ctx.beginPath()
+            ctx.move(to: shape.start)
+            ctx.addLine(to: shape.end)
+            ctx.strokePath()
+        case .shape(let shape):
+            ctx.stroke(shape.shapeRect)
+        case .stroke(let stroke):
+            ctx.stroke(stroke.boundingBox)
+        case .text(let text):
+            ctx.stroke(text.boundingBox)
+        }
+
+        ctx.setLineDash(phase: 0, lengths: [])
+        let dot: CGFloat = 8.0
         ctx.setFillColor(NSColor.white.cgColor)
         ctx.setStrokeColor(NSColor.systemCyan.cgColor)
-        ctx.setLineWidth(1.0)
-        for corner in corners {
-            let r = CGRect(x: corner.x - dot / 2, y: corner.y - dot / 2, width: dot, height: dot)
-            ctx.fill(r)
-            ctx.stroke(r)
+        ctx.setLineWidth(1.2)
+        for entry in item.handlePositions() {
+            let r = CGRect(
+                x: entry.point.x - dot / 2.0,
+                y: entry.point.y - dot / 2.0,
+                width: dot,
+                height: dot
+            )
+            ctx.fillEllipse(in: r)
+            ctx.strokeEllipse(in: r)
         }
         ctx.restoreGState()
     }
@@ -623,7 +642,7 @@ final class CaptureCanvasView: NSView, FloatingToolbarsDelegate, NSTextFieldDele
 
     override func scrollWheel(with event: NSEvent) {
         let hasOption = event.modifierFlags.contains(.option)
-        let isDrawingOrText = selectionRect != nil && (activeTool != .select || activeTextField != nil)
+        let isDrawingOrText = selectionRect != nil && (activeTool != .select || activeTextEditor != nil || selectedAnnotationIndex != nil)
         guard hasOption || isDrawingOrText else {
             super.scrollWheel(with: event)
             return
@@ -639,11 +658,26 @@ final class CaptureCanvasView: NSView, FloatingToolbarsDelegate, NSTextFieldDele
     override func mouseDown(with event: NSEvent) {
         let pt = convert(event.locationInWindow, from: nil)
 
-        if let tf = activeTextField, !tf.frame.contains(pt) {
-            commitActiveTextField()
+        if let editor = activeTextEditor, !editor.frame.contains(pt) {
+            commitActiveTextEditor()
         }
 
         if let sel = selectionRect {
+            // Priority 1: Resize handles on the currently selected annotation
+            if activeTool == .select,
+               let selectedIdx = selectedAnnotationIndex,
+               annotations.indices.contains(selectedIdx),
+               let annHandle = annotations[selectedIdx].hitTestHandle(at: pt) {
+                dragStartAnnotations = annotations
+                dragMode = .resizingAnnotation(
+                    index: selectedIdx,
+                    handle: annHandle,
+                    originalItem: annotations[selectedIdx]
+                )
+                return
+            }
+
+            // Priority 2: Resize handles on the capture selection box
             if let handle = hitTestHandle(at: pt, in: sel) {
                 dragMode = .resizingSelection(handle: handle, initialRect: sel)
                 return
@@ -654,6 +688,13 @@ final class CaptureCanvasView: NSView, FloatingToolbarsDelegate, NSTextFieldDele
                 case .select:
                     if let hitIndex = hitTestAnnotationIndex(at: pt) {
                         selectedAnnotationIndex = hitIndex
+                        syncToolbarWithAnnotation(annotations[hitIndex])
+                        if event.clickCount >= 2, case .text = annotations[hitIndex] {
+                            beginEditingTextAnnotation(at: hitIndex, within: sel)
+                            needsDisplay = true
+                            return
+                        }
+                        dragStartAnnotations = annotations
                         dragMode = .movingAnnotation(
                             index: hitIndex,
                             startPoint: pt,
@@ -665,6 +706,7 @@ final class CaptureCanvasView: NSView, FloatingToolbarsDelegate, NSTextFieldDele
                         dragMode = .movingSelection(startPoint: pt, initialRect: sel)
                     }
                 case .pen:
+                    dragStartAnnotations = annotations
                     dragMode = .drawingAnnotation
                     inProgressItem = .stroke(StrokeAnnotation(
                         kind: .pen,
@@ -673,6 +715,7 @@ final class CaptureCanvasView: NSView, FloatingToolbarsDelegate, NSTextFieldDele
                         lineWidth: activeLineWidth
                     ))
                 case .marker:
+                    dragStartAnnotations = annotations
                     dragMode = .drawingAnnotation
                     inProgressItem = .stroke(StrokeAnnotation(
                         kind: .marker,
@@ -681,6 +724,7 @@ final class CaptureCanvasView: NSView, FloatingToolbarsDelegate, NSTextFieldDele
                         lineWidth: activeLineWidth
                     ))
                 case .line, .arrow, .rectangle, .ellipse:
+                    dragStartAnnotations = annotations
                     dragMode = .drawingAnnotation
                     let kind: ShapeAnnotation.Kind = switch activeTool {
                     case .line: .line
@@ -696,7 +740,14 @@ final class CaptureCanvasView: NSView, FloatingToolbarsDelegate, NSTextFieldDele
                         lineWidth: activeLineWidth
                     ))
                 case .text:
-                    beginInlineTextInput(at: pt, within: sel)
+                    if let hitIndex = hitTestAnnotationIndex(at: pt),
+                       case .text = annotations[hitIndex] {
+                        selectedAnnotationIndex = hitIndex
+                        syncToolbarWithAnnotation(annotations[hitIndex])
+                        beginEditingTextAnnotation(at: hitIndex, within: sel)
+                    } else {
+                        beginNewTextEditor(at: pt, within: sel)
+                    }
                 }
                 needsDisplay = true
                 return
@@ -708,8 +759,12 @@ final class CaptureCanvasView: NSView, FloatingToolbarsDelegate, NSTextFieldDele
             coordinator?.notifySelectionStarted(in: ownerWindow)
         }
         annotations.removeAll()
+        history.clear()
+        dragStartAnnotations = nil
+        lastCoalescedEdit = nil
         inProgressItem = nil
         selectedAnnotationIndex = nil
+        updateHistoryButtons()
         verticalToolbar.isHidden = true
         horizontalToolbar.isHidden = true
         dragMode = .creatingSelection(anchor: pt)
@@ -720,6 +775,22 @@ final class CaptureCanvasView: NSView, FloatingToolbarsDelegate, NSTextFieldDele
     override func mouseDragged(with event: NSEvent) {
         let pt = convert(event.locationInWindow, from: nil).clamped(to: bounds)
         hoverPoint = pt
+        lastDragPoint = pt
+        applyDrag(to: pt, modifierFlags: event.modifierFlags)
+    }
+
+    override func flagsChanged(with event: NSEvent) {
+        super.flagsChanged(with: event)
+        if case .none = dragMode {
+            return
+        }
+        if let lastDragPoint {
+            applyDrag(to: lastDragPoint, modifierFlags: event.modifierFlags)
+        }
+    }
+
+    private func applyDrag(to pt: CGPoint, modifierFlags: NSEvent.ModifierFlags) {
+        let snapLine = modifierFlags.contains(.option) || modifierFlags.contains(.shift)
 
         switch dragMode {
         case .none:
@@ -744,8 +815,28 @@ final class CaptureCanvasView: NSView, FloatingToolbarsDelegate, NSTextFieldDele
             annotations[index] = originalItem.translated(by: delta)
             needsDisplay = true
 
+        case .resizingAnnotation(let index, let handle, let originalItem):
+            guard annotations.indices.contains(index) else { return }
+            var targetPoint = pt
+            if snapLine,
+               case .shape(let shape) = originalItem,
+               shape.kind == .line || shape.kind == .arrow {
+                if handle == .endpointEnd {
+                    targetPoint = AnnotationGeometry.snappedLineEnd(from: shape.start, to: pt).clamped(to: bounds)
+                } else if handle == .endpointStart {
+                    targetPoint = AnnotationGeometry.snappedLineEnd(from: shape.end, to: pt).clamped(to: bounds)
+                }
+            }
+            annotations[index] = originalItem.resized(using: handle, to: targetPoint)
+            if case .text(let updatedText) = annotations[index] {
+                activeTextFontSize = updatedText.fontSize
+                verticalToolbar.selectedTextFontSize = round(updatedText.fontSize)
+            }
+            needsDisplay = true
+
         case .resizingSelection(let handle, let initialRect):
-            selectionRect = resizedRect(from: initialRect, handle: handle, to: pt).clamped(to: bounds)
+            selectionRect = AnnotationGeometry.resizedRect(from: initialRect, handle: handle, to: pt, minSize: 10.0)
+                .clamped(to: bounds)
             needsDisplay = true
 
         case .drawingAnnotation:
@@ -761,7 +852,11 @@ final class CaptureCanvasView: NSView, FloatingToolbarsDelegate, NSTextFieldDele
                 }
                 current = .stroke(stroke)
             case .shape(var shape):
-                shape.end = pt
+                if snapLine && (shape.kind == .line || shape.kind == .arrow) {
+                    shape.end = AnnotationGeometry.snappedLineEnd(from: shape.start, to: pt).clamped(to: bounds)
+                } else {
+                    shape.end = pt
+                }
                 current = .shape(shape)
             case .text:
                 break
@@ -772,6 +867,7 @@ final class CaptureCanvasView: NSView, FloatingToolbarsDelegate, NSTextFieldDele
     }
 
     override func mouseUp(with event: NSEvent) {
+        lastDragPoint = nil
         switch dragMode {
         case .creatingSelection:
             if let sel = selectionRect, (sel.width < 6 || sel.height < 6) {
@@ -779,12 +875,21 @@ final class CaptureCanvasView: NSView, FloatingToolbarsDelegate, NSTextFieldDele
             }
         case .drawingAnnotation:
             if let item = inProgressItem {
+                recordUndoSnapshot()
                 annotations.append(item)
                 inProgressItem = nil
+                updateHistoryButtons()
+            }
+        case .movingAnnotation, .resizingAnnotation:
+            if let before = dragStartAnnotations, before != annotations {
+                lastCoalescedEdit = nil
+                history.recordBeforeMutation(current: before)
+                updateHistoryButtons()
             }
         default:
             break
         }
+        dragStartAnnotations = nil
         dragMode = .none
         updateToolbarsLayout()
         updateCursor(at: convert(event.locationInWindow, from: nil))
@@ -797,18 +902,23 @@ final class CaptureCanvasView: NSView, FloatingToolbarsDelegate, NSTextFieldDele
         let flags = event.modifierFlags.intersection(.deviceIndependentFlagsMask)
 
         if event.keyCode == 53 { // Esc
-            if activeTextField != nil {
-                activeTextField?.removeFromSuperview()
-                activeTextField = nil
-                window?.makeFirstResponder(self)
+            if activeTextEditor != nil {
+                cancelActiveTextEditor()
                 return
             }
             toolbarsDidClickClose()
             return
         }
 
-        if activeTextField != nil {
+        if activeTextEditor != nil {
             super.keyDown(with: event)
+            return
+        }
+
+        if flags == [.command, .shift],
+           let chars = event.charactersIgnoringModifiers?.lowercased(),
+           chars == "z" {
+            toolbarsDidClickRedo()
             return
         }
 
@@ -822,6 +932,9 @@ final class CaptureCanvasView: NSView, FloatingToolbarsDelegate, NSTextFieldDele
                 return
             case "z":
                 toolbarsDidClickUndo()
+                return
+            case "y":
+                toolbarsDidClickRedo()
                 return
             case "p":
                 toolbarsDidClickPrint()
@@ -840,8 +953,10 @@ final class CaptureCanvasView: NSView, FloatingToolbarsDelegate, NSTextFieldDele
 
         if let idx = selectedAnnotationIndex, annotations.indices.contains(idx) {
             if event.keyCode == 51 || event.keyCode == 117 { // Delete / Forward Delete
+                recordUndoSnapshot()
                 annotations.remove(at: idx)
                 selectedAnnotationIndex = nil
+                updateHistoryButtons()
                 needsDisplay = true
                 return
             }
@@ -849,18 +964,22 @@ final class CaptureCanvasView: NSView, FloatingToolbarsDelegate, NSTextFieldDele
             let step: CGFloat = flags.contains(.shift) ? 10.0 : 1.0
             switch event.keyCode {
             case 123: // Left
+                recordCoalescedUndoSnapshot(key: "nudge-\(idx)")
                 annotations[idx] = annotations[idx].translated(by: CGVector(dx: -step, dy: 0))
                 needsDisplay = true
                 return
             case 124: // Right
+                recordCoalescedUndoSnapshot(key: "nudge-\(idx)")
                 annotations[idx] = annotations[idx].translated(by: CGVector(dx: step, dy: 0))
                 needsDisplay = true
                 return
             case 125: // Down (flipped coordinates)
+                recordCoalescedUndoSnapshot(key: "nudge-\(idx)")
                 annotations[idx] = annotations[idx].translated(by: CGVector(dx: 0, dy: step))
                 needsDisplay = true
                 return
             case 126: // Up (flipped coordinates)
+                recordCoalescedUndoSnapshot(key: "nudge-\(idx)")
                 annotations[idx] = annotations[idx].translated(by: CGVector(dx: 0, dy: -step))
                 needsDisplay = true
                 return
@@ -897,64 +1016,148 @@ final class CaptureCanvasView: NSView, FloatingToolbarsDelegate, NSTextFieldDele
 
     // MARK: - Inline Text
 
-    private func beginInlineTextInput(at point: CGPoint, within sel: CGRect) {
-        commitActiveTextField()
+    private func beginNewTextEditor(at point: CGPoint, within sel: CGRect) {
+        commitActiveTextEditor()
 
-        let fieldWidth = max(140, min(280, sel.maxX - point.x - 8))
-        let fieldHeight = max(28, ceil(activeTextFontSize * 1.45) + 8)
-        let fieldY = min(max(point.y - 4, 4), bounds.height - fieldHeight - 4)
-        let field = NSTextField(frame: NSRect(x: point.x, y: fieldY, width: fieldWidth, height: fieldHeight))
-        field.font = NSFont.systemFont(ofSize: round(activeTextFontSize), weight: .semibold)
-        field.textColor = activeColor
-        field.backgroundColor = NSColor.black.withAlphaComponent(0.45)
-        field.isBordered = true
-        field.isBezeled = true
-        field.focusRingType = .none
-        field.placeholderString = "Type & press Enter"
-        field.delegate = self
-
-        addSubview(field)
-        window?.makeFirstResponder(field)
-        activeTextField = field
-        activeTextOrigin = point
+        let initialWidth = max(140, min(280, sel.maxX - point.x - 12))
+        let clampedOrigin = CGPoint(
+            x: min(max(point.x, 8), bounds.width - 70),
+            y: min(max(point.y, 8), bounds.height - 40)
+        )
+        presentTextEditor(
+            origin: clampedOrigin,
+            initialWidth: initialWidth,
+            fontSize: round(activeTextFontSize),
+            color: activeColor,
+            initialText: "",
+            userAdjustedWidth: false,
+            editingIndex: nil
+        )
     }
 
-    func controlTextDidEndEditing(_ obj: Notification) {
-        commitActiveTextField()
+    private func beginEditingTextAnnotation(at index: Int, within sel: CGRect) {
+        guard annotations.indices.contains(index),
+              case .text(let existing) = annotations[index] else {
+            return
+        }
+        commitActiveTextEditor()
+
+        let fallbackWidth = max(160, existing.boundingBox.width + 20)
+        let editorWidth = existing.maxWidth ?? min(max(fallbackWidth, 140), max(sel.maxX - existing.origin.x - 12, 160))
+        presentTextEditor(
+            origin: existing.origin,
+            initialWidth: editorWidth,
+            fontSize: existing.fontSize,
+            color: existing.color,
+            initialText: existing.text,
+            userAdjustedWidth: existing.maxWidth != nil,
+            editingIndex: index
+        )
     }
 
-    private func commitActiveTextField() {
-        guard let field = activeTextField else { return }
-        let text = field.stringValue.trimmingCharacters(in: .newlines)
-        let fontSize = field.font?.pointSize ?? 16
-        field.removeFromSuperview()
-        activeTextField = nil
+    private func presentTextEditor(
+        origin: CGPoint,
+        initialWidth: CGFloat,
+        fontSize: CGFloat,
+        color: NSColor,
+        initialText: String,
+        userAdjustedWidth: Bool,
+        editingIndex: Int?
+    ) {
+        let editor = InlineTextEditorView(
+            origin: origin,
+            initialWidth: initialWidth,
+            fontSize: fontSize,
+            color: color,
+            initialText: initialText,
+            userAdjustedWidth: userAdjustedWidth
+        )
+        editor.onCommit = { [weak self] in
+            self?.commitActiveTextEditor()
+        }
+        editor.onCancel = { [weak self] in
+            self?.cancelActiveTextEditor()
+        }
+        editor.onMetricsChanged = { [weak self] in
+            guard let self, let current = self.activeTextEditor else { return }
+            self.activeTextFontSize = current.textFontSize
+            self.verticalToolbar.selectedTextFontSize = round(current.textFontSize)
+        }
+
+        addSubview(editor)
+        activeTextEditor = editor
+        editingAnnotationIndex = editingIndex
+        editor.focusEditor()
+        needsDisplay = true
+    }
+
+    private func commitActiveTextEditor() {
+        guard let editor = activeTextEditor else { return }
+        let text = editor.textString.trimmingCharacters(in: .newlines)
+        let editIndex = editingAnnotationIndex
+        let origin = editor.textOrigin
+        let color = editor.textColor
+        let fontSize = editor.textFontSize
+        let boxWidth = editor.boxWidth
+        let userAdjusted = editor.userAdjustedWidth
+
+        editor.removeFromSuperview()
+        activeTextEditor = nil
+        editingAnnotationIndex = nil
         window?.makeFirstResponder(self)
 
-        if !text.isEmpty {
+        let naturalWidth = TextAnnotation.measuredSize(text: text, fontSize: fontSize, maxWidth: nil).width
+        let resolvedMaxWidth: CGFloat? = (userAdjusted || naturalWidth > boxWidth + 1.0) ? boxWidth : nil
+
+        if let idx = editIndex, annotations.indices.contains(idx) {
+            if text.isEmpty {
+                recordUndoSnapshot()
+                annotations.remove(at: idx)
+                selectedAnnotationIndex = nil
+            } else {
+                let updatedItem = AnnotationItem.text(TextAnnotation(
+                    origin: origin,
+                    text: text,
+                    color: color,
+                    fontSize: fontSize,
+                    maxWidth: resolvedMaxWidth
+                ))
+                if updatedItem != annotations[idx] {
+                    recordUndoSnapshot()
+                    annotations[idx] = updatedItem
+                }
+                selectedAnnotationIndex = idx
+            }
+        } else if !text.isEmpty {
+            recordUndoSnapshot()
             annotations.append(.text(TextAnnotation(
-                origin: activeTextOrigin,
+                origin: origin,
                 text: text,
-                color: activeColor,
-                fontSize: fontSize
+                color: color,
+                fontSize: fontSize,
+                maxWidth: resolvedMaxWidth
             )))
-            needsDisplay = true
+            if activeTool == .select {
+                selectedAnnotationIndex = annotations.count - 1
+            }
         }
+        updateHistoryButtons()
+        needsDisplay = true
+    }
+
+    private func cancelActiveTextEditor() {
+        guard let editor = activeTextEditor else { return }
+        editor.removeFromSuperview()
+        activeTextEditor = nil
+        editingAnnotationIndex = nil
+        window?.makeFirstResponder(self)
+        needsDisplay = true
     }
 
     // MARK: - Resize Handle Math
 
-    private func handleRect(for handle: ResizeHandle, in sel: CGRect) -> CGRect {
-        let pt: CGPoint = switch handle {
-        case .topLeft: CGPoint(x: sel.minX, y: sel.minY)
-        case .top: CGPoint(x: sel.midX, y: sel.minY)
-        case .topRight: CGPoint(x: sel.maxX, y: sel.minY)
-        case .left: CGPoint(x: sel.minX, y: sel.midY)
-        case .right: CGPoint(x: sel.maxX, y: sel.midY)
-        case .bottomLeft: CGPoint(x: sel.minX, y: sel.maxY)
-        case .bottom: CGPoint(x: sel.midX, y: sel.maxY)
-        case .bottomRight: CGPoint(x: sel.maxX, y: sel.maxY)
-        }
+    private func handleRect(for handle: BoxResizeHandle, in sel: CGRect) -> CGRect {
+        let pt = AnnotationGeometry.handlePoint(for: handle, in: sel)
         return CGRect(
             x: pt.x - handleSize / 2,
             y: pt.y - handleSize / 2,
@@ -963,46 +1166,14 @@ final class CaptureCanvasView: NSView, FloatingToolbarsDelegate, NSTextFieldDele
         )
     }
 
-    private func hitTestHandle(at point: CGPoint, in sel: CGRect) -> ResizeHandle? {
-        for handle in ResizeHandle.allCases {
+    private func hitTestHandle(at point: CGPoint, in sel: CGRect) -> BoxResizeHandle? {
+        for handle in BoxResizeHandle.allCases {
             let expanded = handleRect(for: handle, in: sel).insetBy(dx: -5, dy: -5)
             if expanded.contains(point) {
                 return handle
             }
         }
         return nil
-    }
-
-    private func resizedRect(from initial: CGRect, handle: ResizeHandle, to pt: CGPoint) -> CGRect {
-        var minX = initial.minX
-        var maxX = initial.maxX
-        var minY = initial.minY
-        var maxY = initial.maxY
-
-        switch handle {
-        case .topLeft:
-            minX = min(pt.x, maxX - 10)
-            minY = min(pt.y, maxY - 10)
-        case .top:
-            minY = min(pt.y, maxY - 10)
-        case .topRight:
-            maxX = max(pt.x, minX + 10)
-            minY = min(pt.y, maxY - 10)
-        case .left:
-            minX = min(pt.x, maxX - 10)
-        case .right:
-            maxX = max(pt.x, minX + 10)
-        case .bottomLeft:
-            minX = min(pt.x, maxX - 10)
-            maxY = max(pt.y, minY + 10)
-        case .bottom:
-            maxY = max(pt.y, minY + 10)
-        case .bottomRight:
-            maxX = max(pt.x, minX + 10)
-            maxY = max(pt.y, minY + 10)
-        }
-
-        return CGRect(x: minX, y: minY, width: maxX - minX, height: maxY - minY)
     }
 
     private func hitTestAnnotationIndex(at point: CGPoint) -> Int? {
@@ -1014,9 +1185,40 @@ final class CaptureCanvasView: NSView, FloatingToolbarsDelegate, NSTextFieldDele
         return nil
     }
 
+    private func syncToolbarWithAnnotation(_ item: AnnotationItem) {
+        switch item {
+        case .stroke(let stroke):
+            activeColor = stroke.color
+            verticalToolbar.selectedColor = stroke.color
+            activeLineWidth = stroke.lineWidth
+            verticalToolbar.selectedLineWidth = stroke.lineWidth
+        case .shape(let shape):
+            activeColor = shape.color
+            verticalToolbar.selectedColor = shape.color
+            activeLineWidth = shape.lineWidth
+            verticalToolbar.selectedLineWidth = shape.lineWidth
+        case .text(let text):
+            activeColor = text.color
+            verticalToolbar.selectedColor = text.color
+            activeTextFontSize = text.fontSize
+            verticalToolbar.selectedTextFontSize = round(text.fontSize)
+        }
+    }
+
     private func updateCursor(at point: CGPoint) {
         guard let sel = selectionRect else {
             NSCursor.crosshair.set()
+            return
+        }
+        if activeTool == .select,
+           let selectedIdx = selectedAnnotationIndex,
+           annotations.indices.contains(selectedIdx),
+           let annHandle = annotations[selectedIdx].hitTestHandle(at: point) {
+            switch annHandle {
+            case .box(.left), .box(.right): NSCursor.resizeLeftRight.set()
+            case .box(.top), .box(.bottom): NSCursor.resizeUpDown.set()
+            default: NSCursor.crosshair.set()
+            }
             return
         }
         if let handle = hitTestHandle(at: point, in: sel) {
@@ -1098,7 +1300,7 @@ final class CaptureCanvasView: NSView, FloatingToolbarsDelegate, NSTextFieldDele
     // MARK: - FloatingToolbarsDelegate
 
     func toolbarsDidSelectTool(_ tool: AnnotationTool) {
-        commitActiveTextField()
+        commitActiveTextEditor()
         activeTool = tool
         if tool != .select {
             selectedAnnotationIndex = nil
@@ -1108,35 +1310,81 @@ final class CaptureCanvasView: NSView, FloatingToolbarsDelegate, NSTextFieldDele
 
     func toolbarsDidSelectColor(_ color: NSColor) {
         activeColor = color
-        activeTextField?.textColor = color
+        activeTextEditor?.textColor = color
+        if let idx = selectedAnnotationIndex, annotations.indices.contains(idx) {
+            let updated = annotations[idx].updatingColor(color)
+            if updated != annotations[idx] {
+                recordUndoSnapshot()
+                annotations[idx] = updated
+            }
+            needsDisplay = true
+        }
     }
 
     func toolbarsDidSelectLineWidth(_ width: CGFloat) {
         activeLineWidth = min(max(width, 1.0), 24.0)
         AppPreferences.shared.strokeWidth = activeLineWidth
+        if let idx = selectedAnnotationIndex,
+           annotations.indices.contains(idx),
+           let updated = annotations[idx].updatingLineWidth(activeLineWidth),
+           updated != annotations[idx] {
+            recordCoalescedUndoSnapshot(key: "width-\(idx)")
+            annotations[idx] = updated
+        }
         needsDisplay = true
     }
 
     func toolbarsDidSelectTextFontSize(_ size: CGFloat) {
         activeTextFontSize = min(max(size, 12.0), 72.0)
         AppPreferences.shared.textFontSize = activeTextFontSize
-        updateActiveTextFieldFont()
+        activeTextEditor?.setFontSize(round(activeTextFontSize))
+        if let idx = selectedAnnotationIndex,
+           annotations.indices.contains(idx),
+           let updated = annotations[idx].updatingTextFontSize(round(activeTextFontSize)),
+           updated != annotations[idx] {
+            recordCoalescedUndoSnapshot(key: "font-\(idx)")
+            annotations[idx] = updated
+        }
         needsDisplay = true
     }
 
     private func adjustActiveSize(by delta: CGFloat) {
-        if activeTool == .text || activeTextField != nil {
-            activeTextFontSize = min(max(activeTextFontSize + delta * 1.5, 12.0), 72.0)
+        let selectedIsText: Bool = {
+            if let idx = selectedAnnotationIndex,
+               annotations.indices.contains(idx),
+               case .text = annotations[idx] {
+                return true
+            }
+            return false
+        }()
+
+        if activeTool == .text || activeTextEditor != nil || selectedIsText {
+            let maxTextSize: CGFloat = selectedIsText ? 144.0 : 72.0
+            activeTextFontSize = min(max(activeTextFontSize + delta * 1.5, 10.0), maxTextSize)
             let displayFontSize = round(activeTextFontSize)
-            AppPreferences.shared.textFontSize = displayFontSize
-            verticalToolbar.selectedTextFontSize = displayFontSize
-            updateActiveTextFieldFont()
+            AppPreferences.shared.textFontSize = min(max(displayFontSize, 12.0), 72.0)
+            verticalToolbar.selectedTextFontSize = min(max(displayFontSize, 12.0), 72.0)
+            activeTextEditor?.setFontSize(displayFontSize)
+            if let idx = selectedAnnotationIndex,
+               annotations.indices.contains(idx),
+               let updated = annotations[idx].updatingTextFontSize(displayFontSize),
+               updated != annotations[idx] {
+                recordCoalescedUndoSnapshot(key: "font-\(idx)")
+                annotations[idx] = updated
+            }
             showSizeIndicator("Text: \(Int(displayFontSize)) pt")
         } else {
             activeLineWidth = min(max(activeLineWidth + delta * 0.5, 1.0), 24.0)
             let roundedDisplay = (round(activeLineWidth * 2.0) / 2.0)
             AppPreferences.shared.strokeWidth = activeLineWidth
             verticalToolbar.selectedLineWidth = activeLineWidth
+            if let idx = selectedAnnotationIndex,
+               annotations.indices.contains(idx),
+               let updated = annotations[idx].updatingLineWidth(activeLineWidth),
+               updated != annotations[idx] {
+                recordCoalescedUndoSnapshot(key: "width-\(idx)")
+                annotations[idx] = updated
+            }
             if activeTool == .marker {
                 let markerPx = Int(round(max(activeLineWidth * 4.5, 14.0)))
                 showSizeIndicator("Marker: \(markerPx) px")
@@ -1145,15 +1393,6 @@ final class CaptureCanvasView: NSView, FloatingToolbarsDelegate, NSTextFieldDele
             }
         }
         needsDisplay = true
-    }
-
-    private func updateActiveTextFieldFont() {
-        guard let field = activeTextField else { return }
-        let roundedSize = round(activeTextFontSize)
-        field.font = NSFont.systemFont(ofSize: roundedSize, weight: .semibold)
-        var frame = field.frame
-        frame.size.height = max(28, ceil(roundedSize * 1.45) + 8)
-        field.frame = frame
     }
 
     private func showSizeIndicator(_ text: String) {
@@ -1167,21 +1406,58 @@ final class CaptureCanvasView: NSView, FloatingToolbarsDelegate, NSTextFieldDele
         }
     }
 
-    func toolbarsDidClickUndo() {
-        commitActiveTextField()
-        if !annotations.isEmpty {
-            annotations.removeLast()
-            if let idx = selectedAnnotationIndex, idx >= annotations.count {
-                selectedAnnotationIndex = nil
-            }
-            needsDisplay = true
+    private func updateHistoryButtons() {
+        verticalToolbar.setHistoryAvailability(canUndo: history.canUndo, canRedo: history.canRedo)
+    }
+
+    private func recordUndoSnapshot() {
+        lastCoalescedEdit = nil
+        history.recordBeforeMutation(current: annotations)
+        updateHistoryButtons()
+    }
+
+    private func recordCoalescedUndoSnapshot(key: String) {
+        let now = Date()
+        if let prev = lastCoalescedEdit, prev.key == key, now.timeIntervalSince(prev.at) < 0.45 {
+            lastCoalescedEdit = (key, now)
+            return
         }
+        lastCoalescedEdit = (key, now)
+        history.recordBeforeMutation(current: annotations)
+        updateHistoryButtons()
+    }
+
+    func toolbarsDidClickUndo() {
+        commitActiveTextEditor()
+        guard let previous = history.undo(current: annotations) else { return }
+        lastCoalescedEdit = nil
+        annotations = previous
+        if let idx = selectedAnnotationIndex, !annotations.indices.contains(idx) {
+            selectedAnnotationIndex = nil
+        }
+        updateHistoryButtons()
+        needsDisplay = true
+    }
+
+    func toolbarsDidClickRedo() {
+        commitActiveTextEditor()
+        guard let next = history.redo(current: annotations) else { return }
+        lastCoalescedEdit = nil
+        annotations = next
+        if let idx = selectedAnnotationIndex, !annotations.indices.contains(idx) {
+            selectedAnnotationIndex = nil
+        }
+        updateHistoryButtons()
+        needsDisplay = true
     }
 
     func toolbarsDidClickClear() {
-        commitActiveTextField()
+        commitActiveTextEditor()
+        guard !annotations.isEmpty else { return }
+        recordUndoSnapshot()
         annotations.removeAll()
         selectedAnnotationIndex = nil
+        updateHistoryButtons()
         needsDisplay = true
     }
 
@@ -1206,7 +1482,7 @@ final class CaptureCanvasView: NSView, FloatingToolbarsDelegate, NSTextFieldDele
     }
 
     func toolbarsDidClickShare(from anchorView: NSView) {
-        commitActiveTextField()
+        commitActiveTextEditor()
         guard let image = exportSelectedImage() else { return }
         let picker = NSSharingServicePicker(items: [image])
         picker.show(relativeTo: anchorView.bounds, of: anchorView, preferredEdge: .minY)
@@ -1232,7 +1508,7 @@ final class CaptureCanvasView: NSView, FloatingToolbarsDelegate, NSTextFieldDele
     }
 
     private func finishCapture(action: CaptureCompletionAction) {
-        commitActiveTextField()
+        commitActiveTextEditor()
         guard let image = exportSelectedImage() else { return }
         if let coordinator {
             coordinator.captureSessionDidComplete(with: image, action: action)

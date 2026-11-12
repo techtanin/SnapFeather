@@ -195,4 +195,147 @@ struct SnapFeatherTests {
         let movedStroke = stroke.translated(by: CGVector(dx: 100, dy: 0))
         #expect(movedStroke.hitTest(point: CGPoint(x: 125, y: 25)))
     }
+
+    @Test
+    func resizingExistingShapesStrokesAndTextBoxes() throws {
+        // 1. Rectangle & Ellipse resize
+        let rectItem = AnnotationItem.shape(ShapeAnnotation(
+            kind: .rectangle,
+            start: CGPoint(x: 20, y: 20),
+            end: CGPoint(x: 120, y: 80),
+            color: .red,
+            lineWidth: 3
+        ))
+        let resizedRect = rectItem.resized(using: .box(.bottomRight), to: CGPoint(x: 220, y: 180))
+        if case .shape(let shape) = resizedRect {
+            #expect(shape.start == CGPoint(x: 20, y: 20))
+            #expect(shape.end == CGPoint(x: 220, y: 180))
+        } else {
+            Issue.record("Expected resized shape")
+        }
+
+        // 2. Arrow endpoint resize
+        let arrowItem = AnnotationItem.shape(ShapeAnnotation(
+            kind: .arrow,
+            start: CGPoint(x: 10, y: 10),
+            end: CGPoint(x: 100, y: 50),
+            color: .blue,
+            lineWidth: 3
+        ))
+        let movedTip = arrowItem.resized(using: .endpointEnd, to: CGPoint(x: 180, y: 90))
+        if case .shape(let arrow) = movedTip {
+            #expect(arrow.start == CGPoint(x: 10, y: 10))
+            #expect(arrow.end == CGPoint(x: 180, y: 90))
+        } else {
+            Issue.record("Expected resized arrow")
+        }
+
+        // 3. Freehand stroke path resize scales points proportionally
+        let strokeItem = AnnotationItem.stroke(StrokeAnnotation(
+            kind: .pen,
+            points: [CGPoint(x: 50, y: 50), CGPoint(x: 100, y: 100)],
+            color: .green,
+            lineWidth: 4
+        ))
+        let originalBox = strokeItem.boundingBox
+        let stretchedStroke = strokeItem.resized(
+            using: .box(.bottomRight),
+            to: CGPoint(x: originalBox.maxX + 50, y: originalBox.maxY + 50)
+        )
+        #expect(abs(stretchedStroke.boundingBox.width - (originalBox.width + 50)) < 1.0)
+        #expect(abs(stretchedStroke.boundingBox.height - (originalBox.height + 50)) < 1.0)
+
+        // 4. Text box width resize wraps text and grows height
+        let textItem = AnnotationItem.text(TextAnnotation(
+            origin: CGPoint(x: 40, y: 40),
+            text: "Hello SnapFeather resizable wrapped text box",
+            color: .white,
+            fontSize: 18,
+            maxWidth: nil
+        ))
+        let initialBox = textItem.boundingBox
+        let narrowText = textItem.resized(using: .box(.right), to: CGPoint(x: 140, y: initialBox.midY))
+        if case .text(let wrapped) = narrowText {
+            #expect(wrapped.maxWidth == 100)
+            #expect(wrapped.fontSize == 18)
+            #expect(narrowText.boundingBox.height > initialBox.height)
+        } else {
+            Issue.record("Expected wrapped text annotation")
+        }
+
+        // 5. Text box corner resize scales font size
+        let scaledText = textItem.resized(
+            using: .box(.bottomRight),
+            to: CGPoint(x: initialBox.minX + initialBox.width * 2.0, y: initialBox.minY + initialBox.height * 2.0)
+        )
+        if case .text(let bigText) = scaledText {
+            #expect(bigText.fontSize > 30)
+            #expect(bigText.origin == CGPoint(x: 40, y: 40))
+        } else {
+            Issue.record("Expected scaled text annotation")
+        }
+
+        // 6. Straight line snapping at 0°, 45°, and 90° increments
+        let start = CGPoint(x: 100, y: 100)
+        let almostHorizontal = AnnotationGeometry.snappedLineEnd(from: start, to: CGPoint(x: 220, y: 108))
+        #expect(abs(almostHorizontal.y - 100) < 0.01)
+        #expect(almostHorizontal.x > 200)
+
+        let almostVertical = AnnotationGeometry.snappedLineEnd(from: start, to: CGPoint(x: 106, y: 240))
+        #expect(abs(almostVertical.x - 100) < 0.01)
+        #expect(almostVertical.y > 220)
+
+        let almostDiagonal = AnnotationGeometry.snappedLineEnd(from: start, to: CGPoint(x: 205, y: 195))
+        #expect(abs((almostDiagonal.x - 100) - (almostDiagonal.y - 100)) < 0.01)
+    }
+
+    @Test
+    func annotationHistoryUndoAndRedoFlow() {
+        var history = AnnotationHistory()
+        var items: [AnnotationItem] = []
+
+        #expect(history.canUndo == false)
+        #expect(history.canRedo == false)
+
+        // Step 1: Add rectangle
+        let rect = AnnotationItem.shape(ShapeAnnotation(
+            kind: .rectangle,
+            start: CGPoint(x: 10, y: 10),
+            end: CGPoint(x: 80, y: 60),
+            color: .red,
+            lineWidth: 3
+        ))
+        history.recordBeforeMutation(current: items)
+        items.append(rect)
+
+        // Step 2: Resize rectangle
+        let resized = rect.resized(using: .box(.bottomRight), to: CGPoint(x: 140, y: 120))
+        history.recordBeforeMutation(current: items)
+        items[0] = resized
+
+        // Step 3: Clear all
+        history.recordBeforeMutation(current: items)
+        items.removeAll()
+        #expect(items.isEmpty)
+        #expect(history.canUndo == true)
+
+        // Undo Clear -> back to resized rect
+        items = history.undo(current: items)!
+        #expect(items == [resized])
+        #expect(history.canRedo == true)
+
+        // Undo Resize -> back to original rect
+        items = history.undo(current: items)!
+        #expect(items == [rect])
+
+        // Redo -> back to resized rect
+        items = history.redo(current: items)!
+        #expect(items == [resized])
+        #expect(history.canRedo == true)
+
+        // New edit clears redo stack
+        history.recordBeforeMutation(current: items)
+        items.append(.text(TextAnnotation(origin: .zero, text: "Hi", color: .white, fontSize: 16)))
+        #expect(history.canRedo == false)
+    }
 }

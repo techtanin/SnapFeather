@@ -7,6 +7,7 @@ protocol FloatingToolbarsDelegate: AnyObject {
     func toolbarsDidSelectLineWidth(_ width: CGFloat)
     func toolbarsDidSelectTextFontSize(_ size: CGFloat)
     func toolbarsDidClickUndo()
+    func toolbarsDidClickRedo()
     func toolbarsDidClickClear()
     func toolbarsDidClickCopy()
     func toolbarsDidClickQuickSave()
@@ -45,9 +46,15 @@ class ToolbarIconButton: NSButton {
         fatalError("init(coder:) has not been implemented")
     }
 
+    override var isEnabled: Bool {
+        didSet { updateAppearance() }
+    }
+
     override func resetCursorRects() {
         super.resetCursorRects()
-        addCursorRect(bounds, cursor: .pointingHand)
+        if isEnabled {
+            addCursorRect(bounds, cursor: .pointingHand)
+        }
     }
 
     override func updateTrackingAreas() {
@@ -66,6 +73,7 @@ class ToolbarIconButton: NSButton {
     }
 
     override func mouseEntered(with event: NSEvent) {
+        guard isEnabled else { return }
         isHovered = true
         NSCursor.pointingHand.set()
         updateAppearance()
@@ -78,10 +86,11 @@ class ToolbarIconButton: NSButton {
     }
 
     private func updateAppearance() {
+        alphaValue = isEnabled ? 1.0 : 0.34
         if isToolActive {
             layer?.backgroundColor = NSColor.controlAccentColor.withAlphaComponent(0.9).cgColor
             contentTintColor = .white
-        } else if isHovered {
+        } else if isHovered && isEnabled {
             layer?.backgroundColor = NSColor.white.withAlphaComponent(0.14).cgColor
             contentTintColor = customAccentColor ?? .white
         } else {
@@ -123,8 +132,10 @@ final class VerticalAnnotationToolbar: FloatingToolbarPanel {
     private var toolButtons: [AnnotationTool: ToolbarIconButton] = [:]
     private let colorButton = ToolbarIconButton(frame: .zero)
     private let colorPopover = NSPopover()
+    private var undoButton: ToolbarIconButton?
+    private var redoButton: ToolbarIconButton?
 
-    var selectedTool: AnnotationTool = .pen {
+    var selectedTool: AnnotationTool = .select {
         didSet { updateActiveStates() }
     }
 
@@ -136,10 +147,17 @@ final class VerticalAnnotationToolbar: FloatingToolbarPanel {
     var selectedTextFontSize: CGFloat = AppPreferences.shared.textFontSize
 
     init() {
-        super.init(frame: NSRect(x: 0, y: 0, width: 38, height: 392))
+        super.init(frame: NSRect(x: 0, y: 0, width: 38, height: 424))
         setupButtons()
         updateActiveStates()
         updateColorSwatch()
+        setHistoryAvailability(canUndo: false, canRedo: false)
+    }
+
+    func setHistoryAvailability(canUndo: Bool, canRedo: Bool) {
+        undoButton?.isEnabled = canUndo
+        redoButton?.isEnabled = canRedo
+        window?.invalidateCursorRects(for: self)
     }
 
     private func setupButtons() {
@@ -177,7 +195,14 @@ final class VerticalAnnotationToolbar: FloatingToolbarPanel {
         let undoBtn = makeIconButton(symbol: "arrow.uturn.backward", tooltip: "Undo (⌘Z)") { [weak self] in
             self?.delegate?.toolbarsDidClickUndo()
         }
+        undoButton = undoBtn
         stack.addArrangedSubview(undoBtn)
+
+        let redoBtn = makeIconButton(symbol: "arrow.uturn.forward", tooltip: "Redo (⌘⇧Z)") { [weak self] in
+            self?.delegate?.toolbarsDidClickRedo()
+        }
+        redoButton = redoBtn
+        stack.addArrangedSubview(redoBtn)
 
         let clearBtn = makeIconButton(symbol: "trash", tooltip: "Clear All Annotations") { [weak self] in
             self?.delegate?.toolbarsDidClickClear()
